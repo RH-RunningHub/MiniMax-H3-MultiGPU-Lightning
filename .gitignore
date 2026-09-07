@@ -1,0 +1,27 @@
+# 敏感文件（仅根目录）
+/.env
+/*.key
+/*.pem
+/config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 大文件不入库（仅根目录）
+/*.pth
+/*.ckpt
+/*.safetensors
+/*.bin
+/models/
+/weights/
+
+# OS / IDE / 日志
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+.idea/
+.vscode/
+node_modules/

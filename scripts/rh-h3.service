@@ -1,0 +1,19 @@
+[Unit]
+Description=SGLang MiniMax-H3 serving instance (8 GPU, TP2+Ulysses4)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/data/sglang-h3/start.sh
+WorkingDirectory=/data/sglang-h3
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=1800
+Environment=PATH=/data/sglang-h3/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Persist torch.compile / triton caches across restarts
+Environment=TORCHINDUCTOR_CACHE_DIR=/data/sglang-h3/compile-cache/torchinductor
+Environment=TRITON_CACHE_DIR=/data/sglang-h3/compile-cache/triton
+
+[Install]
+WantedBy=multi-user.target
