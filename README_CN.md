@@ -1,233 +1,346 @@
-# MiniMax-H3 多卡推理加速方案
+# RunningHub H3 Lightning
+
+**MiniMax H3 多卡推理加速方案 · 5 秒视频生成耗时从 348.8 秒降至 28.7 秒**
+
+[English](./README.md) | **简体中文**
 
 [![RunningHub China](https://img.shields.io/badge/RunningHub-China-2F80ED)](https://www.runninghub.cn/?inviteCode=rh-v1367)
-[![RunningHub International](https://img.shields.io/badge/RunningHub-International-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
-[![English](https://img.shields.io/badge/Language-English-2563EB)](./README.md)
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-EF4444)](./README_CN.md)
+[![RunningHub Global](https://img.shields.io/badge/RunningHub-Global-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
+[![License](https://img.shields.io/badge/Code-Apache%202.0-green)](./LICENSE)
 
-![License](https://img.shields.io/badge/License-Apache%202.0-green)
+H3 Lightning 是 RunningHub 面向 MiniMax H3 的推理加速方案。在 **8× NVIDIA RTX 6000D** 的对照测试中，生成一段 5 秒视频的耗时从 **348.8 秒降至 28.7 秒**，约 **12.2 倍加速、91.8% 耗时降低**。
 
-在 8× RTX 6000D 上把 MiniMax-H3 视频生成推理提速约 12 倍的完整方案：RH 后训练加速模型（步数蒸馏）+ SageAttention2 + Cache-DiT + torch.compile，配合 sglang `multimodal_gen` 推理引擎与 TP2+Ulysses4 多卡并行。**sglang 源码（验证过的固定版本）已直接内嵌在本仓库 `sglang/` 目录**，克隆本仓库即可获得整套方案，无需再单独克隆上游。目标是让手里同样有 8 卡 RTX 6000D（或类似卡型）的团队，能把整套方案复现出来。
+本仓库公开加速技术路线、固定版本的 SGLang 推理源码，以及从环境安装、权重下载到视频生成和性能记录的操作步骤，帮助开发者在自己的多卡环境中部署和评估 H3 Lightning。
 
----
+## 性能结果
 
-## 前言
+### 5 秒文生视频：8 卡对照
 
-AI 把文字或图片变成视频，需要多轮计算逐步生成画面，"生成步数"越多等待越久。我们在一组 5 秒视频生成的对照测试中，将 MiniMax-H3 的生成耗时从 **348.8 秒缩短到 28.7 秒**，整体速度约为基线的 **12 倍**。
+| 配置 | 请求步数 | 生成耗时 | 相对基线 |
+|---|---:|---:|---:|
+| MiniMax H3 BF16 基础方案 | 50 | 348.8 秒 | 1.0× |
+| 加入 RH 后训练加速模型 | 4 | 43.0 秒 | 8.1× |
+| **RH 加速模型 + SageAttention2 + Cache-DiT + torch.compile** | **4** | **28.7 秒** | **12.2×** |
 
-更快看到结果，更快调整创意，更快尝试下一版——这是我们优化 H3 推理速度的出发点。
+测试口径：8× RTX 6000D，5 秒、1344×768、文生视频（`t2va`），数据由 RunningHub 实测提供。耗时为服务预热后的生成耗时，不包含模型加载、首次编译、排队和文件下载。**12.2× 是步数蒸馏与执行优化的整体收益，包含生成步数变化。**
 
-### 加速路线与实测数据
+加速比为 `348.8 / 28.7 ≈ 12.15`；耗时降低比例为 `1 − 28.7 / 348.8 ≈ 91.77%`。这里的“5 秒”指请求时长；实际帧数按 H3 的时间桶对齐。
 
-#### 5 秒文生视频对照（1344×768 · t2va · 4× RTX 6000D · TP2+Ulysses2）
+### 15 秒视频：文字与双参考图
 
-全部实测方案，按生成耗时降序：
+| 任务 | 分辨率 | GPU / 并行 | 请求步数 | 生成耗时 |
+|---|---|---|---:|---:|
+| 文生视频 `t2va` | 768×1344 | 8 卡 / TP2+Ulysses4 | 4 | 48.2 秒 |
+| 双参考图 `ref2va` | 768×1344 | 8 卡 / TP2+Ulysses4 | 4 | 73.0 秒 |
+| 文生视频 `t2va`，高动态档 | 768×1344 | 8 卡 / TP2+Ulysses4 | 8 | 89.3 秒 |
+| 双参考图 `ref2va`，高动态档 | 768×1344 | 8 卡 / TP2+Ulysses4 | 8 | 134.3 秒 |
 
-| 方案 | 步数 | 生成耗时 | 相对基线* | 备注 |
-|---|---:|---:|---:|---|
-| BF16 基础方案（原版权重） | 50 | 348.8 秒 | 1× | 加速比基线 |
-| INT8-ConvRot 量化 | 50 | 316.2 秒 | 1.10× | |
-| NVFP4 量化 | 50 | 283.8 秒 | 1.23× | 画质验收不通过，弃用 |
-| BF16 + turbo LoRA（步数蒸馏） | 9 | 60.0 秒 | 5.8× | 开源 LoRA 同档可达 |
-| BF16 + turbo LoRA + Cache-DiT | 9 | 57.3 秒 | 6.1× | Cache-DiT 单独 +4.5% |
-| PulpCut INT8+turbo 预融合 + flashinfer RoPE/LN | 8 | 48.8 秒 | 7.1× | 与 PulpCut 持平，无收益，未采用 |
-| PulpCut INT8+turbo 预融合 | 8 | 48.7 秒 | 7.2× | 仅 fl2va 验证过，自行验收画质 |
-| BF16 + turbo LoRA + SageAttention2 | 9 | 36.5 秒 | 9.6× | |
-| BF16 + turbo LoRA + SageAttention2 + Cache-DiT | 9 | 33.1 秒 | 10.5× | |
-| **BF16 + turbo LoRA + SageAttention2 + Cache-DiT + torch.compile（服务端定型配置）** | 9 | **28.7 秒** | **12.2×** | |
+在独立的 8 卡并行对照中，15 秒文生视频由 TP4+Ulysses2 的 54.0 秒降至 TP2+Ulysses4 的 48.2 秒，速度约提高 12%，显存占用约降低 14 GiB。这项收益不与上面的 12.2× 相乘。
 
-\* 以 BF16 原版权重 50 步（348.8 秒）为基线。对照组在 8 卡机的单个 4 卡实例（TP2+U2）上测得，另一半卡当时同时服务 ref2va 实例；数据为服务预热后的净速，不含排队与模型加载。
+以上是特定测试配置的测量结果。下方示例中的公开 LoRA、提示词和参考图会影响耗时与画面，复测时应同时记录生成结果与完整配置。
 
-**减少要做的计算（步数蒸馏），再让剩下的计算执行得更快（算子与编译优化）。**整体加速包含步数变化与计算优化的综合收益，各组件收益不能单独拆分。
+## 加速方法与开源范围
 
-#### 8 卡对照（15s · 768×1344，定型并行 TP2+U4）
-
-多卡并行方式上，我们针对 PCIe 互联（无 NVLink）的环境对比了不同切分方式，在 8 卡上定型 **TP2 + Ulysses4**：比 TP4 + Ulysses2 再快约 **12%**，同时省约 **14 GiB** 显存（独立对比数据，不与 12× 叠乘）。
-
-净速，按生成耗时降序；无同条件基线，不列倍数：
-
-| 生成方式 | 并行 / 卡数 | 步数 | 生成耗时 | 备注 |
-|---|---|---:|---:|---|
-| 双参考图生成（ref2va） | TP2+U4 · 8 卡 | 8 | 134.3 秒 | 高动态 8 步档 |
-| 双参考图生成（ref2va，横屏 1344×768） | TP2+U4 · 8 卡 | 4 | 93.4 秒 | |
-| 文字生成视频（t2va） | TP2+U4 · 8 卡 | 8 | 89.3 秒 | 高动态 8 步档 |
-| 双参考图生成（ref2va） | TP2+U4 · 8 卡 | 4 | 73.0 秒 | |
-| 文字生成视频（t2va，TP4 切分对照） | TP4+U2 · 8 卡 | 4 | 54.0 秒 | 比 TP2+U4 慢 12%，省约 14GiB |
-| 文字生成视频（t2va，定型形态） | TP2+U4 · 8 卡 | 4 | 48.2 秒 | 比 4 卡部署快约 40% |
-
-\* 15 秒组为 8 卡单实例实测（预热后净速）；t2va 与 ref2va 分别在两台同型 8 卡机上验证。
-
-**步数建议：默认 4 步即可；快速运动、大幅动作等高动态内容推荐 8 步**，在速度与画面表现之间取舍。
-
-## 🛠️ 部署安装
-
-### 环境要求
-
-- Ubuntu 22.04（其他版本自行调整），Python 3.10
-- NVIDIA 驱动 580+；宿主机**必须安装 ffmpeg / ffprobe**（H3 启动强校验，缺失会 worker 反复 crash）
-- 实测硬件：8× NVIDIA RTX 6000D（sm_120，PCIe 互联，无 NVLink），单卡 85GB 显存
-- sglang 版本：上游 main `f8cbf000f4a5`（2026-09-02），**源码已内嵌在本仓库 `sglang/` 目录**（版本说明见 `sglang/RH-PIN.md`），安装脚本默认直接使用内嵌副本
-
-### 一键安装脚本
-
-```bash
-bash scripts/install.sh
-```
-
-脚本内容（可拆开手动执行）：
-
-```bash
-#!/bin/bash
-set -e
-
-# 1. 系统依赖
-apt-get update && apt-get install -y ffmpeg git python3.10 python3.10-venv
-
-# 2. 虚拟环境
-python3.10 -m venv /data/sglang-h3/venv
-source /data/sglang-h3/venv/bin/activate
-pip install -U pip wheel
-
-# 3. sglang（源码内嵌在本仓库 sglang/ 目录，= 上游 main @ f8cbf000f4a5）
-cd <本仓库目录>/sglang
-SGLANG_BUILD_RUST_EXTS=no pip install --no-build-isolation -e python
-
-# 4. SageAttention2（需 nvcc/CUDA toolkit 编译）
-pip install packaging ninja
-git clone https://github.com/thu-ml/SageAttention.git /tmp/SageAttention
-cd /tmp/SageAttention && CUDA_HOME=/usr/local/cuda pip install --no-build-isolation .
-
-echo "INSTALL-DONE"
-```
-
-### 启动脚本与 systemd
-
-模型与服务参数写在 `scripts/start.sh`（对应 61 机 fl2va 实例）：
-
-```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export SGLANG_CACHE_DIT_ENABLED=true
-
-exec /data/sglang-h3/venv/bin/sglang serve \
-  --model-path /data/models/MiniMax-H3 \
-  --model-variant fl2va \
-  --num-gpus 8 --tp-size 2 --ulysses-degree 4 \
-  --attention-backend sage_attn \
-  --enable-torch-compile \
-  --performance-mode speed --host 0.0.0.0 --port 30010 \
-  --lora-path /data/sglang-h3/models-lora \
-  --lora-weight-name minimax_h3_turbo_v4_step600_ema.safetensors \
-  --lora-nickname turbo --lora-scale 1.0 --lora-merge-mode auto
-```
-
-要点：
-
-- `--model-variant`：`fl2va`（文生/首尾帧）与 `ref2va`（参考图/视频/音频）**互不兼容，需分别起实例**；ref2va 实例把 variant 换成 `ref2va` 并挂 ref2v 系 LoRA 即可，其余参数相同。
-- `--tp-size 2 --ulysses-degree 4`：PCIe 机型实测最优组合（比 TP4+U2 快 12%、省 14GiB）。
-- 建议按 `scripts/rh-h3.service` 用 systemd 托管（`Restart=on-failure`），并持久化编译缓存：
-
-```ini
-[Service]
-Environment=TORCHINDUCTOR_CACHE_DIR=/data/sglang-h3/compile-cache/torchinductor
-Environment=TRITON_CACHE_DIR=/data/sglang-h3/compile-cache/triton
-```
-
-- torch.compile 首个大 shape 请求需付 1–3 分钟编译；持久化缓存后，**重启服务不再重复编译**。首次跑通后建议按实际业务预热常用 shape（如 15s / 9:16 与 16:9）。
-
-## 📦 模型下载与安装
-
-### 基座模型（必下）
-
-[MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)（约 354GB，BF16，含 FL2VA 与 Ref2VA 两组组件）：
-
-```bash
-pip install -U "huggingface_hub[cli]"
-# 国内网络可加 export HF_ENDPOINT=https://hf-mirror.com
-HF_HUB_DISABLE_XET=1 hf download MiniMaxAI/MiniMax-H3 --local-dir /data/models/MiniMax-H3
-```
-
-> 提示：`HF_HUB_DISABLE_XET=1` 必加，否则走 Xet 通道在镜像源上会 401 卡死；不要用 aria2 多连接下载（会拼坏 xet 文件）。
-
-### 加速 LoRA（开源替代，可达约 80% 效果）
-
-> **关于 RH 后训练加速模型**：RunningHub 自训的加速模型目前**兼容性还没有处理完，暂时不开放下载**。在开放之前，可以用市面上已经开源的加速 LoRA 替代，实测能达到约 **80%** 的效果（对照：RH 版 9 步 60.0s，开源 LoRA 同档速度与画质接近，流程完全一致）。
-
-| 模型 | 地址 | 说明 |
+| 层次 | 方法 | 作用 |
 |---|---|---|
-| larryvrh 加速 LoRA | [larryvrh/MiniMax-H3-Turbo-Lora](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora) | `minimax_h3_turbo_v4_step600_ema.safetensors`（743MB，4–9 步可用；**sglang 官方 cookbook 的推荐档**，本文 5.8× 基准即用它） |
-| lightx2v 加速 LoRA | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | fl2v / ref2v 各 4 步、8 步档位（`minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors` 等），任务针对性蒸馏，速度与质量同档或更好 |
+| 减少生成计算 | 后训练加速 / 步数蒸馏 | 用更少的生成步骤完成视频与音频生成 |
+| 提高执行效率 | SageAttention2、Cache-DiT、torch.compile | 优化注意力计算，复用部分计算结果，编译执行图 |
+| 优化多卡协作 | TP2+Ulysses4 | 在 PCIe、无 NVLink 环境下组合张量并行与序列并行 |
+
+RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任务验证；运行时基于 **SGLang `multimodal_gen`**。完整 SGLang 源码已内嵌于本仓库，版本为 `f8cbf000f4a5bfd86d3fb7c1e2d6c8fb12339d0e`，见 [版本记录](./sglang/RH-PIN.md)。
+
+本方案的主干网络使用 **BF16 权重**，没有使用 INT8/NVFP4 权重量化；VAE 等组件沿用上游的精度配置。SageAttention 内部采用量化注意力计算，蒸馏与 Cache-DiT 也会改变计算路径，因此 BF16 权重本身不代表逐算子等价或画质无损。实际验收应覆盖主体一致性、细节、运动连贯性、提示词遵循及音画同步。
+
+**权重发布状态：**RH 自训加速权重暂未公开。开发者可使用社区加速 LoRA 替代，配合本仓库复现完整推理与加速流程。下方给出两种公开 LoRA 的固定版本下载和使用示例；不同权重的速度与画质需分别评测，上述 12.2× 数据对应 RH 权重。
+
+## 环境要求
+
+| 项目 | 本文配置 |
+|---|---|
+| 系统 / Python | Ubuntu 22.04 / Python 3.10 |
+| GPU | 8× RTX 6000D，PCIe 互联，无 NVLink；实测环境单卡约 85 GB 显存 |
+| 驱动 / 工具链 | NVIDIA 580+；安装与 PyTorch CUDA 版本匹配的 CUDA Toolkit，本快照使用 CUDA 13 系列依赖 |
+| 关键 Python 依赖 | PyTorch 2.13.0、Diffusers 0.37.0、Cache-DiT 1.3.0，完整声明见 [pyproject.toml](./sglang/python/pyproject.toml) |
+| 系统工具 | `nvcc`、C++ 编译器、`ffmpeg`、`ffprobe` |
+| 磁盘 | 基座模型约 354 GB，另外预留 LoRA、编译缓存及输出视频空间 |
+
+8 卡 TP2+U4 配置的已有峰值显存记录约为 60–66 GiB/卡，实际值随任务、shape 与编译状态变化。其他硬件应单独验证容量和性能。
+
+## 1. 安装推理环境
+
+下面的命令是本文的复现入口。除 `sudo` 系统依赖安装外，以普通用户执行；在同一 Bash 会话中完成第 1–3 节。提前安装 CUDA Toolkit，并将 `CUDA_HOME` 指向包含 `bin/nvcc` 的目录；下载 Python 包不会替代本机编译工具链。
 
 ```bash
-hf download larryvrh/MiniMax-H3-Turbo-Lora --local-dir /data/sglang-h3/models-lora
+sudo apt-get update
+sudo apt-get install -y git curl ffmpeg build-essential python3.10 python3.10-dev python3.10-venv
+
+git clone https://github.com/RH-RunningHub/MiniMax-H3-MultiGPU-Lightning.git
+cd MiniMax-H3-MultiGPU-Lightning
+export REPO_ROOT="$PWD"
+export H3_HOME="$HOME/h3-lightning"
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+
+test -x "$CUDA_HOME/bin/nvcc" || { echo "Set CUDA_HOME to your CUDA 13 toolkit directory"; exit 1; }
+mkdir -p "$H3_HOME" "$H3_HOME/models-lora" "$H3_HOME/outputs" "$H3_HOME/runs"
+python3.10 -m venv "$H3_HOME/venv"
+source "$H3_HOME/venv/bin/activate"
+
+python -m pip install --upgrade pip wheel packaging ninja \
+  "setuptools>=77" "setuptools-rust>=1.11" "setuptools-scm>=8"
+python -m pip install "torch==2.13.0"
+SGLANG_BUILD_RUST_EXTS=none python -m pip install --no-build-isolation \
+  -e "$REPO_ROOT/sglang/python[diffusion]"
+
+git clone https://github.com/thu-ml/SageAttention.git "$H3_HOME/SageAttention"
+git -C "$H3_HOME/SageAttention" checkout d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4
+MAX_JOBS=8 python -m pip install --no-build-isolation "$H3_HOME/SageAttention"
+python -m pip check
 ```
 
-### 模型放置与显存参考
+`python[diffusion]` 提供视频生成依赖；`SGLANG_BUILD_RUST_EXTS=none` 跳过此流程不需要的 Rust 扩展构建。SageAttention 固定到内嵌 SGLang backend 指向的 [兼容提交](https://github.com/thu-ml/SageAttention/tree/d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4)。
 
-```text
-/data/sglang-h3/
-├── venv/                 # Python 环境
-├── models-lora/          # 加速 LoRA safetensors
-└── compile-cache/        # torch.compile / triton 缓存（持久化）
-```
-
-- 8 卡 TP2+U4 实测峰值显存约 **60–66 GiB/卡**（BF16 + turbo LoRA + compile）。
-- 单卡显存不足 80GB 的 8 卡机型，请先降低分辨率/时长验证，或评估量化方案（注意自行验收画质）。
-
-## 🚀 使用方法
-
-服务就绪后调用 OpenAI 风格视频接口（完整示例见 `scripts/api_example.sh`）：
+安装后验证实际 CUDA 算子，并保存环境记录：
 
 ```bash
-curl -s -X POST http://127.0.0.1:30010/v1/videos -H 'Content-Type: application/json' -d '{
+python - <<'PY'
+import torch, diffusers, cache_dit
+from sageattention import sageattn
+
+assert torch.cuda.is_available(), "CUDA is not available"
+assert torch.cuda.device_count() == 8, "Expose exactly 8 GPUs for this example"
+print("torch:", torch.__version__, "CUDA:", torch.version.cuda)
+print("GPU:", torch.cuda.get_device_name(0))
+q = torch.randn(1, 128, 4, 128, device="cuda", dtype=torch.bfloat16)
+out = sageattn(q, q, q, tensor_layout="NHD", is_causal=False)
+torch.cuda.synchronize()
+assert out.shape == q.shape and torch.isfinite(out).all().item()
+print("SageAttention operator check: OK")
+PY
+
+python -m pip freeze --all > "$H3_HOME/environment.freeze.txt"
+git -C "$REPO_ROOT" rev-parse HEAD > "$H3_HOME/repository-commit.txt"
+nvidia-smi > "$H3_HOME/nvidia-smi.txt"
+nvidia-smi topo -m > "$H3_HOME/gpu-topology.txt"
+"$CUDA_HOME/bin/nvcc" --version > "$H3_HOME/nvcc-version.txt"
+```
+
+保留上述记录和源码 checkout。`environment.freeze.txt` 用于记录本次解析后的依赖；它不等同于历史性能测试的环境锁文件。重复部署时应沿用已验收的记录。
+
+## 2. 下载基座与公开加速 LoRA
+
+基座使用 [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)，文生/首尾帧示例使用 [larryvrh 的 v4 EMA LoRA](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)。以下 revision 固定公开下载内容，并已核对相应模型分区和文件名。
+
+```bash
+export H3_MODEL_REV=42ed227ee7df40d41602854ae760620d6eb651fe
+export H3_LORA_REV=43a74557ac3f6539db8e0f2a959d03feb7a81480
+
+hf download MiniMaxAI/MiniMax-H3 \
+  --revision "$H3_MODEL_REV" --local-dir "$H3_HOME/models/MiniMax-H3"
+hf download larryvrh/MiniMax-H3-Turbo-Lora \
+  minimax_h3_turbo_v4_step600_ema.safetensors \
+  --revision "$H3_LORA_REV" --local-dir "$H3_HOME/models-lora"
+
+printf 'base=%s\nlora=%s\n' "$H3_MODEL_REV" "$H3_LORA_REV" > "$H3_HOME/model-revisions.txt"
+sha256sum "$H3_HOME/models-lora/minimax_h3_turbo_v4_step600_ema.safetensors" \
+  > "$H3_HOME/lora.sha256"
+```
+
+网络需要 Hugging Face 镜像时可配置 `HF_ENDPOINT`；若所用镜像不支持 Xet，再设置 `HF_HUB_DISABLE_XET=1`。使用 Hugging Face 客户端下载并保留 revision，避免混用不同版本的模型组件。
+
+## 3. 启动 8 卡服务
+
+下面生成可复用的启动文件，默认加载公开 LoRA、开启 Cache-DiT 和 torch.compile，使用 TP2+Ulysses4。编译缓存保存在 `H3_HOME`，可在相同软件、硬件及 shape 条件下复用；新 shape 或依赖变更仍可能触发编译。
+
+```bash
+cat > "$H3_HOME/serve-h3.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+H3_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+export SGLANG_CACHE_DIT_ENABLED="${SGLANG_CACHE_DIT_ENABLED:-true}"
+export TORCHINDUCTOR_CACHE_DIR="$H3_HOME/compile-cache/torchinductor"
+export TRITON_CACHE_DIR="$H3_HOME/compile-cache/triton"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$H3_HOME/outputs"
+
+args=(serve --model-path "$H3_HOME/models/MiniMax-H3"
+  --model-variant "${MODEL_VARIANT:-fl2va}"
+  --num-gpus 8 --tp-size 2 --ulysses-degree 4
+  --attention-backend "${ATTENTION_BACKEND:-sage_attn}"
+  --performance-mode speed --host 127.0.0.1 --port "${PORT:-30010}"
+  --output-path "$H3_HOME/outputs")
+if [[ "${ENABLE_COMPILE:-1}" == 1 ]]; then
+  args+=(--enable-torch-compile)
+else
+  args+=(--enable-torch-compile false)
+fi
+if [[ "${USE_LORA:-1}" == 1 ]]; then
+  args+=(--lora-path "$H3_HOME/models-lora"
+    --lora-weight-name "${LORA_FILE:-minimax_h3_turbo_v4_step600_ema.safetensors}"
+    --lora-nickname turbo --lora-scale 1.0 --lora-merge-mode auto)
+fi
+exec "$H3_HOME/venv/bin/sglang" "${args[@]}"
+BASH
+chmod +x "$H3_HOME/serve-h3.sh"
+"$H3_HOME/serve-h3.sh" 2>&1 | tee "$H3_HOME/server.log"
+```
+
+首次请求可能需要数分钟编译。检查日志确认模型和 LoRA 加载成功、实际使用 SageAttention；完成健康检查后，先预热常用时长与横竖屏 shape。服务默认只监听本机；跨机访问应通过带认证的网关，并限制模型管理接口。
+
+## 4. 提交任务、保存指标并下载视频
+
+在第二个终端设置环境，待服务就绪后创建一个 5 秒横屏、4 步推理请求：
+
+```bash
+export H3_HOME="$HOME/h3-lightning"
+source "$H3_HOME/venv/bin/activate"
+curl --fail --show-error http://127.0.0.1:30010/health
+
+cat > "$H3_HOME/request.json" <<'JSON'
+{
   "model": "MiniMaxAI/MiniMax-H3",
-  "prompt": "美女主播在直播中跳舞，跳大摆锤",
-  "seconds": 15,
   "task": "t2va",
+  "prompt": "A dancer performs a flowing routine in a bright studio, full body shot, smooth camera movement.",
   "conditions": [],
-  "target": {"short_edge": 768, "aspect_ratio": "9:16", "duration_seconds": 15.0},
+  "target": {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5.0},
   "num_inference_steps": 4,
-  "flow_shift": 12.0, "audio_flow_shift": 3.0, "seed": 20260904
-}'
-# 轮询 GET /v1/videos/{id}，完成后 GET /v1/videos/{id}/content 下载
+  "flow_shift": 12.0,
+  "audio_flow_shift": 3.0,
+  "seed": 20260904
+}
+JSON
 ```
 
-- `task`：`t2va`（文生）/ `fl2va`（首尾帧，conditions 带 `role=keyframe`）/ `ref2va`（参考素材，conditions 带 `role=reference`）。
-- 时长会向上对齐 17n+5 帧桶（24fps 固定）：15s→362 帧、8s→192 帧正好。
-- ref2va 任务必须发往 `--model-variant ref2va` 的实例。
+生成 15 秒竖屏视频时，将 `target.duration_seconds` 改为 `15.0`，`target.aspect_ratio` 改为 `"9:16"`。默认从 4 步开始；快速运动或大幅动作可尝试 8 步，并使用对应 LoRA 的推荐档位。`target.duration_seconds` 是时长入口，不要同时传入 `fps` 或 `num_frames`。固定 24 fps，时间桶为 `17n+5`：5 秒对齐为 124 帧，15 秒对齐为 362 帧。
 
-## 📄 License
+以下客户端完成提交、带截止时间的轮询、HTTP 错误检查和音视频流校验。每次运行都保存请求、最终任务响应、性能指标和 ffprobe 结果：
 
-- 本仓库代码：Apache 2.0
-- MiniMax-H3 模型权重遵循 [MiniMax-H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3)，使用前请阅读其许可条款
-- 引用的加速 LoRA 遵循各自仓库的许可
+```bash
+cat > "$H3_HOME/generate.py" <<'PY'
+import json, os, shutil, subprocess, sys, time, uuid
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-## 🔗 Links
+base = os.environ.get("BASE", "http://127.0.0.1:30010").rstrip("/")
+payload = json.loads(Path(sys.argv[1]).read_text())
+run_dir = Path(__file__).resolve().parent / "runs" / uuid.uuid4().hex
+run_dir.mkdir(parents=True)
+(run_dir / "request.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
-[![RunningHub China](https://img.shields.io/badge/RunningHub-China-2F80ED)](https://www.runninghub.cn/?inviteCode=rh-v1367)
-[![RunningHub International](https://img.shields.io/badge/RunningHub-International-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
+def api(path, data=None):
+    body = None if data is None else json.dumps(data).encode()
+    request = Request(base + path, data=body, headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=600 if data is not None else 30) as response:
+        return json.load(response)
 
-- [sgl-project/sglang](https://github.com/sgl-project/sglang)（本方案固定版本 `f8cbf000f4a5`）
-- [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)
-- [larryvrh/MiniMax-H3-Turbo-Lora](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora) / [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo)
-- [SageAttention](https://github.com/thu-ml/SageAttention)
+started = time.monotonic()
+job = api("/v1/videos", payload)  # Do not retry POST: a timeout may still have created a job.
+job_id = job["id"]
+deadline = started + 1800
+while True:
+    (run_dir / "job.json").write_text(json.dumps(job, ensure_ascii=False, indent=2))
+    if job["status"] == "completed":
+        break
+    if job["status"] in {"failed", "error", "cancelled", "deleted"}:
+        raise RuntimeError(f"Job {job_id}: {job}")
+    if time.monotonic() >= deadline:
+        raise TimeoutError(f"Job {job_id}; inspect {base}/v1/videos/{job_id}")
+    time.sleep(2)
+    try:
+        job = api(f"/v1/videos/{job_id}")
+    except HTTPError as error:
+        if error.code not in {429, 500, 502, 503, 504}:
+            raise
+    except URLError:
+        pass  # GET failures retry within the overall deadline.
 
-## 🙏 Acknowledgements
+metrics = {"inference_time_s": job.get("inference_time_s"),
+           "peak_memory_mb": job.get("peak_memory_mb"),
+           "submit_to_completed_s": time.monotonic() - started}
+(run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+partial = run_dir / "video.partial.mp4"
+try:
+    with urlopen(base + f"/v1/videos/{job_id}/content", timeout=120) as response:
+        with partial.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format",
+                            "-of", "json", str(partial)], check=True, capture_output=True, text=True)
+    media = json.loads(probe.stdout)
+    kinds = {stream.get("codec_type") for stream in media["streams"]}
+    if not {"video", "audio"} <= kinds:
+        raise RuntimeError("Expected both video and audio streams")
+    (run_dir / "ffprobe.json").write_text(probe.stdout)
+    partial.replace(run_dir / "video.mp4")
+finally:
+    partial.unlink(missing_ok=True)
+print(json.dumps({"id": job_id, "output": str(run_dir), **metrics}, indent=2))
+PY
+python "$H3_HOME/generate.py" "$H3_HOME/request.json"
+```
 
-- [sgl-project/sglang](https://github.com/sgl-project/sglang) — multimodal_gen 推理引擎与多卡并行
-- [MiniMax](https://huggingface.co/MiniMaxAI) — MiniMax-H3 开源模型
-- [lightx2v](https://huggingface.co/lightx2v) / [larryvrh](https://huggingface.co/larryvrh) — 开源加速 LoRA
-- [thu-ml/SageAttention](https://github.com/thu-ml/SageAttention) — 注意力算子加速
+输出位于 `$H3_HOME/runs/<run-id>/video.mp4`。`inference_time_s` 是服务端报告的生成时间，`submit_to_completed_s` 包含提交、排队和轮询等待，二者应分开统计；`peak_memory_mb` 是服务端返回的指标，缺失时不能当作 0。记录每卡显存峰值时需额外采集各 GPU 的监控数据。
 
----
+## 5. 使用参考图生成
 
-## 后言
+`fl2va` 模型分区处理 `t2va` 和首尾帧任务；`ref2va` 使用独立分区及匹配 LoRA。两种分区不能由同一已加载实例随请求切换。以下示例在停止原服务、释放 8 张 GPU 后启动参考图实例：
 
-这套方案的本质是两句话：**减少要做的计算，再让剩下的计算执行得更快。**步数蒸馏解决"做多少"，SageAttention2、Cache-DiT 与 torch.compile 解决"做多快"，TP2+Ulysses4 解决"多张 PCIe 卡怎么配合"。三者彼此独立，可按自己的硬件与画质要求分步引入。
+```bash
+hf download lightx2v/Minimax-h3-Turbo \
+  minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors \
+  --revision 2f015e66b37c585cea9dc4ae6f1850ea8788e742 \
+  --local-dir "$H3_HOME/models-lora"
 
-我们计划持续把复现说明细化到"可检查的配置与对应结果"。不同卡型、驱动与模型版本上数字会有出入，请以自己的对照测试为准；如果复现中遇到问题或有改进思路，欢迎提 Issue 交流。
+MODEL_VARIANT=ref2va \
+LORA_FILE=minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors \
+  "$H3_HOME/serve-h3.sh" 2>&1 | tee "$H3_HOME/server-ref2va.log"
+```
 
-**让创作者更快看到想法，让开发者更容易理解方法。**
+将下列请求保存为 `$H3_HOME/request-ref2va.json`，把两个 URI 替换为**服务器上实际存在的参考图绝对路径**，然后运行 `python "$H3_HOME/generate.py" "$H3_HOME/request-ref2va.json"`。该公开示例使用 8 步 Ref2V LoRA，与上表 4 步内部测试配置不同。
 
----
+```json
+{
+  "model": "MiniMaxAI/MiniMax-H3",
+  "task": "ref2va",
+  "prompt": "The character in reference image 1 walks through the setting in reference image 2, cinematic tracking shot.",
+  "conditions": [
+    {"type": "image", "uri": "file:///absolute/server/path/reference-1.png", "role": "reference"},
+    {"type": "image", "uri": "file:///absolute/server/path/reference-2.png", "role": "reference"}
+  ],
+  "target": {"short_edge": 768, "aspect_ratio": "9:16", "duration_seconds": 15.0},
+  "num_inference_steps": 8,
+  "flow_shift": 12.0,
+  "audio_flow_shift": 3.0,
+  "seed": 20260904
+}
+```
 
-*测试说明：数据来自 2026 年 9 月技术测试记录。约 12 倍加速对应 4 张 RTX 6000D、5 秒、1344×768 文字生成视频测试，以 BF16、50 步方案为基线，是包含生成步数变化的整套方案对比；15 秒竖屏数据对应 8 张 RTX 6000D、4 步设置。以上为服务预热后的生成耗时，不代表包含排队等环节的完整等待时间，效果随任务和设置变化。*
+首尾帧任务使用 `task: "fl2va"`，条件设置 `role: "keyframe"`，第一帧 `frame_index: 0`、最后一帧 `frame_index: -1`；目标画幅使用 `aspect_ratio: "auto"`，由关键帧解析。更多原生输入说明见 [MiniMax H3 模型文档](https://huggingface.co/MiniMaxAI/MiniMax-H3)。
+
+## 6. 在自己的硬件上复测
+
+1. 固定基座和 LoRA revision、prompt、seed、时长、分辨率以及参考素材。上面的 prompt 是可执行示例，不是历史测试素材。
+2. 分别启动每档配置，等待模型加载和编译完成；每档对同一 shape 先预热，再至少运行 5 次，保留所有单次结果、生成视频与中位数。
+3. 同时保存启动环境变量、服务日志、请求 JSON、模型哈希、依赖记录及 GPU 拓扑。使用相同的时间口径计算加速比。
+4. 对照检查画面细节、主体与运动、音频及同步，确认减少步数和缓存符合业务质量要求后再采用该档配置。
+
+例如，停止加速服务后，可用以下命令启动无 LoRA、无 Cache-DiT、无 compile 的 BF16/Flash Attention 基础配置，将请求中的 `num_inference_steps` 改为 50；再切回默认启动命令和 LoRA 推荐步数进行对比。这定义的是本机公开 LoRA 对照实验，不能仅凭配置名称等同于上表的 RH 权重实测。
+
+```bash
+USE_LORA=0 ENABLE_COMPILE=0 SGLANG_CACHE_DIT_ENABLED=false ATTENTION_BACKEND=fa \
+  "$H3_HOME/serve-h3.sh" 2>&1 | tee "$H3_HOME/server-baseline.log"
+```
+
+要单独测量 LoRA 的加速收益，将上述 `USE_LORA=0` 改为 `USE_LORA=1`，并把请求步数改为 4；要测量全部优化，则使用第 3 节的默认启动命令和 4 步请求。每次切换配置前停止上一实例，并使用同一组输入。
+
+保留服务日志中的实际 attention backend，确认没有发生缺少依赖后的回退。常见问题：`nvcc` 找不到时检查 `CUDA_HOME`；缺少 `cache_dit` 时核对是否安装了 diffusion extra；请求分区不匹配时检查服务的 `MODEL_VARIANT`；首次运行较慢时先区分模型加载、编译与稳定生成耗时。
+
+## License 与致谢
+
+本仓库代码使用 [Apache 2.0](./LICENSE)。MiniMax H3 基座权重遵循其 [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3)，公开 LoRA 的使用条件以各模型仓库为准。
+
+感谢 [MiniMax](https://huggingface.co/MiniMaxAI/MiniMax-H3)、[SGLang](https://github.com/sgl-project/sglang)、[SageAttention](https://github.com/thu-ml/SageAttention)、[Cache-DiT](https://github.com/vipshop/cache-dit)、[larryvrh](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora) 和 [LightX2V](https://huggingface.co/lightx2v/Minimax-h3-Turbo) 的开源工作。
+
+体验 RunningHub：[中国站](https://www.runninghub.cn/?inviteCode=rh-v1367) · [国际站](https://www.runninghub.ai/?inviteCode=rh-v1367)。提交复现问题时，请附硬件、版本记录、启动命令、去除敏感信息后的请求和错误日志。

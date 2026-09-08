@@ -1,232 +1,346 @@
-# MiniMax-H3 Multi-GPU Inference Acceleration
+# RunningHub H3 Lightning
+
+**Multi-GPU inference acceleration for MiniMax H3 · 5-second video generation from 348.8 s to 28.7 s**
+
+**English** | [简体中文](./README_CN.md)
 
 [![RunningHub China](https://img.shields.io/badge/RunningHub-China-2F80ED)](https://www.runninghub.cn/?inviteCode=rh-v1367)
-[![RunningHub International](https://img.shields.io/badge/RunningHub-International-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
-[![English](https://img.shields.io/badge/Language-English-2563EB)](./README.md)
-[![简体中文](https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-EF4444)](./README_CN.md)
+[![RunningHub Global](https://img.shields.io/badge/RunningHub-Global-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
+[![License](https://img.shields.io/badge/Code-Apache%202.0-green)](./LICENSE)
 
-![License](https://img.shields.io/badge/License-Apache%202.0-green)
+H3 Lightning is RunningHub's inference acceleration recipe for MiniMax H3. In a comparison on **8× NVIDIA RTX 6000D**, generating a 5-second video took **28.7 seconds**, down from **348.8 seconds**: approximately **12.2× faster, with 91.8% lower generation latency**.
 
-A complete recipe that speeds up MiniMax-H3 video generation by ~12× on 8× RTX 6000D: RH post-training acceleration model (step distillation) + SageAttention2 + Cache-DiT + torch.compile, served by the sglang `multimodal_gen` engine with TP2+Ulysses4 multi-GPU parallelism. **The pinned sglang source is bundled directly in this repo under `sglang/`** — clone this repo and you have the whole solution; no separate upstream clone needed. The goal is that teams with 8× RTX 6000D (or similar cards) can reproduce it end to end.
+This repository publishes the acceleration approach, a pinned SGLang source snapshot, and instructions covering installation, model downloads, video generation and measurement so developers can deploy and evaluate the recipe on their own multi-GPU systems.
 
----
+## Performance results
 
-## Introduction
+### 5-second text-to-video: eight-GPU comparison
 
-Turning text or images into video takes many iterative compute rounds — more steps, longer waits. In an A/B benchmark on 5-second video generation, we cut MiniMax-H3 generation time from **348.8 s to 28.7 s**, roughly **12×** faster than the baseline.
+| Configuration | Requested steps | Generation latency | Speedup over baseline |
+|---|---:|---:|---:|
+| MiniMax H3 BF16 baseline | 50 | 348.8 s | 1.0× |
+| With RH post-trained acceleration model | 4 | 43.0 s | 8.1× |
+| **RH acceleration model + SageAttention2 + Cache-DiT + torch.compile** | **4** | **28.7 s** | **12.2×** |
 
-Faster feedback, faster iteration — that is what drove this work.
+Test conditions: 8× RTX 6000D, 5 seconds, 1344×768, text-to-video (`t2va`), measured by RunningHub. These are generation latencies after warmup; model loading, initial compilation, queueing and downloads are excluded. **The 12.2× result combines step distillation and execution optimizations, including a change in generation step count.**
 
-### The recipe and measured numbers
+Speedup is `348.8 / 28.7 ≈ 12.15`; latency reduction is `1 − 28.7 / 348.8 ≈ 91.77%`. Five seconds is the requested duration; H3 aligns the delivered frame count to its temporal buckets.
 
-#### 5-second t2va A/B (1344×768 · 4× RTX 6000D · TP2+Ulysses2)
+### 15-second video: text and two reference images
 
-All measured configurations, sorted by latency (descending):
+| Task | Resolution | GPUs / parallelism | Requested steps | Generation latency |
+|---|---|---|---:|---:|
+| Text-to-video `t2va` | 768×1344 | 8 / TP2+Ulysses4 | 4 | 48.2 s |
+| Two references `ref2va` | 768×1344 | 8 / TP2+Ulysses4 | 4 | 73.0 s |
+| Text-to-video `t2va`, high motion | 768×1344 | 8 / TP2+Ulysses4 | 8 | 89.3 s |
+| Two references `ref2va`, high motion | 768×1344 | 8 / TP2+Ulysses4 | 8 | 134.3 s |
 
-| Approach | Steps | Latency | vs. baseline* | Notes |
-|---|---:|---:|---:|---|
-| BF16 baseline (original weights) | 50 | 348.8 s | 1× | speedup baseline |
-| INT8-ConvRot quantization | 50 | 316.2 s | 1.10× | |
-| NVFP4 quantization | 50 | 283.8 s | 1.23× | failed quality acceptance, dropped |
-| BF16 + turbo LoRA (step distillation) | 9 | 60.0 s | 5.8× | open-source LoRAs reach the same tier |
-| BF16 + turbo LoRA + Cache-DiT | 9 | 57.3 s | 6.1× | Cache-DiT alone adds 4.5% |
-| PulpCut fused INT8+turbo + flashinfer RoPE/LN | 8 | 48.8 s | 7.1× | on par with PulpCut, no gain, not adopted |
-| PulpCut fused INT8+turbo | 8 | 48.7 s | 7.2× | validated on fl2va only, review quality yourself |
-| BF16 + turbo LoRA + SageAttention2 | 9 | 36.5 s | 9.6× | |
-| BF16 + turbo LoRA + SageAttention2 + Cache-DiT | 9 | 33.1 s | 10.5× | |
-| **BF16 + turbo LoRA + SageAttention2 + Cache-DiT + torch.compile (final serving config)** | 9 | **28.7 s** | **12.2×** | |
+A separate eight-GPU parallelism comparison reduced 15-second text-to-video latency from 54.0 s with TP4+Ulysses2 to 48.2 s with TP2+Ulysses4: approximately 12% higher speed and 14 GiB less GPU memory usage. This result is independent of the 12.2× comparison above.
 
-\* Baseline = original BF16 weights at 50 steps (348.8 s). The A/B group ran on a single 4-GPU instance (TP2+U2) of an 8-GPU machine, while the other half served ref2va at the time. All numbers are post-warmup net latencies, excluding queueing and model loading.
+These measurements describe specific test configurations. Public LoRAs, prompts and reference images in the instructions below affect both speed and output; retain generated videos and the full configuration when comparing runs.
 
-**Do less computation (step distillation), then make the remaining computation faster (kernel & compile optimizations).** The overall speedup combines fewer steps and faster steps; per-component gains cannot be separated.
+## Acceleration approach and release scope
 
-#### 8-GPU comparison (15s · 768×1344, production parallel TP2+U4)
-
-For multi-GPU parallelism on PCIe-only machines (no NVLink), we benchmarked split strategies and settled on **TP2 + Ulysses4** on 8 cards: ~**12%** faster than TP4 + Ulysses2 while saving ~**14 GiB** of GPU memory (independent comparison, not multiplied with the 12×).
-
-Net latency, sorted descending; no same-condition baseline, so no multipliers:
-
-| Generation mode | Parallel / GPUs | Steps | Latency | Notes |
-|---|---|---:|---:|---|
-| Two reference images (ref2va) | TP2+U4 · 8× | 8 | 134.3 s | 8-step tier for high motion |
-| Two reference images (ref2va, landscape 1344×768) | TP2+U4 · 8× | 4 | 93.4 s | |
-| Text-to-video (t2va) | TP2+U4 · 8× | 8 | 89.3 s | 8-step tier for high motion |
-| Two reference images (ref2va) | TP2+U4 · 8× | 4 | 73.0 s | |
-| Text-to-video (t2va, TP4 split A/B) | TP4+U2 · 8× | 4 | 54.0 s | 12% slower than TP2+U4, saves ~14GiB |
-| Text-to-video (t2va, production shape) | TP2+U4 · 8× | 4 | 48.2 s | ~40% faster than the 4-GPU setup |
-
-\* The 15s group is measured on single 8-GPU instances (post-warmup net latency); t2va and ref2va were validated on two identical 8-GPU machines.
-
-**Step count guidance: 4 steps by default; 8 steps for fast motion / large-amplitude actions**, trading speed for fidelity.
-
-## 🛠️ Installation
-
-### Requirements
-
-- Ubuntu 22.04, Python 3.10
-- NVIDIA driver 580+; **ffmpeg / ffprobe are mandatory** on the host (H3 hard-validates them at startup)
-- Tested hardware: 8× NVIDIA RTX 6000D (sm_120, PCIe, no NVLink), 85GB each
-- sglang: upstream main `f8cbf000f4a5` (2026-09-02), **source bundled in this repo under `sglang/`** (pin notes in `sglang/RH-PIN.md`); the install script uses the bundled copy by default
-
-### One-shot install
-
-```bash
-bash scripts/install.sh
-```
-
-The script (expand to run manually):
-
-```bash
-#!/bin/bash
-set -e
-
-# 1. System deps
-apt-get update && apt-get install -y ffmpeg git python3.10 python3.10-venv
-
-# 2. Virtual env
-python3.10 -m venv /data/sglang-h3/venv
-source /data/sglang-h3/venv/bin/activate
-pip install -U pip wheel
-
-# 3. sglang (bundled in this repo at sglang/, = upstream main @ f8cbf000f4a5)
-cd <this repo>/sglang
-SGLANG_BUILD_RUST_EXTS=no pip install --no-build-isolation -e python
-
-# 4. SageAttention2 (needs nvcc/CUDA toolkit to build)
-pip install packaging ninja
-git clone https://github.com/thu-ml/SageAttention.git /tmp/SageAttention
-cd /tmp/SageAttention && CUDA_HOME=/usr/local/cuda pip install --no-build-isolation .
-
-echo "INSTALL-DONE"
-```
-
-### Start script & systemd
-
-`scripts/start.sh` launches the serving instance:
-
-```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export SGLANG_CACHE_DIT_ENABLED=true
-
-exec /data/sglang-h3/venv/bin/sglang serve \
-  --model-path /data/models/MiniMax-H3 \
-  --model-variant fl2va \
-  --num-gpus 8 --tp-size 2 --ulysses-degree 4 \
-  --attention-backend sage_attn \
-  --enable-torch-compile \
-  --performance-mode speed --host 0.0.0.0 --port 30010 \
-  --lora-path /data/sglang-h3/models-lora \
-  --lora-weight-name minimax_h3_turbo_v4_step600_ema.safetensors \
-  --lora-nickname turbo --lora-scale 1.0 --lora-merge-mode auto
-```
-
-Key points:
-
-- `--model-variant`: `fl2va` (text / keyframes) and `ref2va` (reference images / video / audio) are **mutually exclusive — run one instance per variant**. For a ref2va instance, switch the variant and mount a ref2v LoRA; everything else stays the same.
-- `--tp-size 2 --ulysses-degree 4`: best combo measured on PCIe-only boxes (12% faster than TP4+U2, saves 14GiB).
-- Manage with `scripts/rh-h3.service` (systemd, `Restart=on-failure`) and persist the compile caches:
-
-```ini
-[Service]
-Environment=TORCHINDUCTOR_CACHE_DIR=/data/sglang-h3/compile-cache/torchinductor
-Environment=TRITON_CACHE_DIR=/data/sglang-h3/compile-cache/triton
-```
-
-- The first large-shape request after (re)start pays 1–3 minutes of torch.compile; with the cache persisted, restarts do not recompile. After the first successful run, warm up your common shapes (e.g. 15s / 9:16 and 16:9).
-
-## 📦 Model Download & Installation
-
-### Base model (required)
-
-[MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) (~354GB, BF16, ships FL2VA and Ref2VA component sets):
-
-```bash
-pip install -U "huggingface_hub[cli]"
-HF_HUB_DISABLE_XET=1 hf download MiniMaxAI/MiniMax-H3 --local-dir /data/models/MiniMax-H3
-```
-
-> Keep `HF_HUB_DISABLE_XET=1`; the Xet channel 401-loops against mirrors. Avoid multi-connection downloaders (they corrupt xet-backed files).
-
-### Acceleration LoRAs (open-source substitutes, ~80% of the effect)
-
-> **About the RH post-trained acceleration model**: RunningHub's in-house acceleration model is **not yet available for download** — compatibility work is still ongoing. In the meantime, open-source acceleration LoRAs are a drop-in substitute that reaches roughly **80%** of the effect; the rest of the pipeline stays identical.
-
-| Model | Link | Notes |
+| Layer | Method | Purpose |
 |---|---|---|
-| larryvrh acceleration LoRA | [larryvrh/MiniMax-H3-Turbo-Lora](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora) | `minimax_h3_turbo_v4_step600_ema.safetensors` (743MB, works at 4–9 steps; **recommended in sglang's official cookbook**, used in our 5.8× benchmark) |
-| lightx2v acceleration LoRA | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | fl2v / ref2v, 4-step and 8-step variants (`minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors` etc.), task-specific distillation |
+| Less generation work | Post-training / step distillation | Generate video and audio with fewer steps |
+| Faster execution | SageAttention2, Cache-DiT, torch.compile | Optimize attention, reuse parts of the computation, and compile execution graphs |
+| Multi-GPU execution | TP2+Ulysses4 | Combine tensor and sequence parallelism on PCIe systems without NVLink |
+
+RunningHub's work covers component integration, parameter selection, parallelism configuration and workload validation. The runtime is **SGLang `multimodal_gen`**. Its source is bundled at `f8cbf000f4a5bfd86d3fb7c1e2d6c8fb12339d0e`; see the [pin record](./sglang/RH-PIN.md).
+
+The backbone uses **BF16 weights**, without INT8/NVFP4 weight quantization; components such as the VAEs retain their upstream precision settings. SageAttention uses quantized attention internally, while distillation and Cache-DiT also change the computation. BF16 weights therefore do not imply identical arithmetic or lossless output. Evaluate subject consistency, detail, motion continuity, prompt adherence and audio/video synchronization.
+
+**Weight availability:** RH's in-house acceleration weights are not currently public. Developers can substitute community acceleration LoRAs to reproduce the complete inference and acceleration workflow. The instructions below pin and demonstrate two public LoRAs. Evaluate speed and quality for each set of weights; the 12.2× result above was measured with RH weights.
+
+## Requirements
+
+| Item | Configuration used here |
+|---|---|
+| OS / Python | Ubuntu 22.04 / Python 3.10 |
+| GPUs | 8× RTX 6000D, PCIe, no NVLink; approximately 85 GB per GPU in the measured environment |
+| Driver / toolkit | NVIDIA 580+; a CUDA Toolkit matching PyTorch's CUDA version; this snapshot uses CUDA 13 dependencies |
+| Key Python dependencies | PyTorch 2.13.0, Diffusers 0.37.0, Cache-DiT 1.3.0; full declarations in [pyproject.toml](./sglang/python/pyproject.toml) |
+| System tools | `nvcc`, a C++ compiler, `ffmpeg`, `ffprobe` |
+| Disk | Approximately 354 GB for the base model, plus space for LoRAs, compilation caches and generated videos |
+
+Existing eight-GPU TP2+U4 measurements report approximately 60–66 GiB peak memory per GPU. Usage varies with task, shape and compilation state; validate capacity and performance separately on other hardware.
+
+## 1. Install the inference environment
+
+Use the commands below as the reproduction entry point. Run as a regular user except for the `sudo` system-package commands, and keep the same Bash session for sections 1–3. Install a CUDA Toolkit first and point `CUDA_HOME` to the directory containing `bin/nvcc`; Python packages do not replace the local compiler toolchain.
 
 ```bash
-hf download larryvrh/MiniMax-H3-Turbo-Lora --local-dir /data/sglang-h3/models-lora
+sudo apt-get update
+sudo apt-get install -y git curl ffmpeg build-essential python3.10 python3.10-dev python3.10-venv
+
+git clone https://github.com/RH-RunningHub/MiniMax-H3-MultiGPU-Lightning.git
+cd MiniMax-H3-MultiGPU-Lightning
+export REPO_ROOT="$PWD"
+export H3_HOME="$HOME/h3-lightning"
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+
+test -x "$CUDA_HOME/bin/nvcc" || { echo "Set CUDA_HOME to your CUDA 13 toolkit directory"; exit 1; }
+mkdir -p "$H3_HOME" "$H3_HOME/models-lora" "$H3_HOME/outputs" "$H3_HOME/runs"
+python3.10 -m venv "$H3_HOME/venv"
+source "$H3_HOME/venv/bin/activate"
+
+python -m pip install --upgrade pip wheel packaging ninja \
+  "setuptools>=77" "setuptools-rust>=1.11" "setuptools-scm>=8"
+python -m pip install "torch==2.13.0"
+SGLANG_BUILD_RUST_EXTS=none python -m pip install --no-build-isolation \
+  -e "$REPO_ROOT/sglang/python[diffusion]"
+
+git clone https://github.com/thu-ml/SageAttention.git "$H3_HOME/SageAttention"
+git -C "$H3_HOME/SageAttention" checkout d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4
+MAX_JOBS=8 python -m pip install --no-build-isolation "$H3_HOME/SageAttention"
+python -m pip check
 ```
 
-### Layout & memory reference
+`python[diffusion]` installs video-generation dependencies. `SGLANG_BUILD_RUST_EXTS=none` skips Rust extensions not needed here. SageAttention is pinned to the [compatibility commit](https://github.com/thu-ml/SageAttention/tree/d9704247a5139ab4c03bf7fc6b35cc0e2cbb5ea4) referenced by the bundled backend.
 
-```text
-/data/sglang-h3/
-├── venv/                 # Python environment
-├── models-lora/          # acceleration LoRA safetensors
-└── compile-cache/        # torch.compile / triton caches (persisted)
-```
-
-- Measured peak memory on 8× TP2+U4: **60–66 GiB per card** (BF16 + turbo LoRA + compile).
-- For 8-GPU boxes with <80GB cards, validate with lower resolution/duration first, or evaluate quantization (validate image quality yourself).
-
-## 🚀 Usage
-
-OpenAI-style video API (full example in `scripts/api_example.sh`):
+Check the actual CUDA operator and save environment records:
 
 ```bash
-curl -s -X POST http://127.0.0.1:30010/v1/videos -H 'Content-Type: application/json' -d '{
+python - <<'PY'
+import torch, diffusers, cache_dit
+from sageattention import sageattn
+
+assert torch.cuda.is_available(), "CUDA is not available"
+assert torch.cuda.device_count() == 8, "Expose exactly 8 GPUs for this example"
+print("torch:", torch.__version__, "CUDA:", torch.version.cuda)
+print("GPU:", torch.cuda.get_device_name(0))
+q = torch.randn(1, 128, 4, 128, device="cuda", dtype=torch.bfloat16)
+out = sageattn(q, q, q, tensor_layout="NHD", is_causal=False)
+torch.cuda.synchronize()
+assert out.shape == q.shape and torch.isfinite(out).all().item()
+print("SageAttention operator check: OK")
+PY
+
+python -m pip freeze --all > "$H3_HOME/environment.freeze.txt"
+git -C "$REPO_ROOT" rev-parse HEAD > "$H3_HOME/repository-commit.txt"
+nvidia-smi > "$H3_HOME/nvidia-smi.txt"
+nvidia-smi topo -m > "$H3_HOME/gpu-topology.txt"
+"$CUDA_HOME/bin/nvcc" --version > "$H3_HOME/nvcc-version.txt"
+```
+
+Retain these records and the source checkout. `environment.freeze.txt` records the dependency resolution for your installation; it is not a lock file from the historical benchmark. Reuse your validated environment records for subsequent deployments.
+
+## 2. Download the base model and a public acceleration LoRA
+
+Use [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) with [larryvrh's v4 EMA LoRA](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora) for the text/keyframe example. The revisions below fix the public download contents; the corresponding partitions and filenames have been checked.
+
+```bash
+export H3_MODEL_REV=42ed227ee7df40d41602854ae760620d6eb651fe
+export H3_LORA_REV=43a74557ac3f6539db8e0f2a959d03feb7a81480
+
+hf download MiniMaxAI/MiniMax-H3 \
+  --revision "$H3_MODEL_REV" --local-dir "$H3_HOME/models/MiniMax-H3"
+hf download larryvrh/MiniMax-H3-Turbo-Lora \
+  minimax_h3_turbo_v4_step600_ema.safetensors \
+  --revision "$H3_LORA_REV" --local-dir "$H3_HOME/models-lora"
+
+printf 'base=%s\nlora=%s\n' "$H3_MODEL_REV" "$H3_LORA_REV" > "$H3_HOME/model-revisions.txt"
+sha256sum "$H3_HOME/models-lora/minimax_h3_turbo_v4_step600_ema.safetensors" \
+  > "$H3_HOME/lora.sha256"
+```
+
+Set `HF_ENDPOINT` if your network requires a Hugging Face mirror. Set `HF_HUB_DISABLE_XET=1` when that mirror does not support Xet. Use the Hugging Face client and retain model revisions to avoid mixing components from different snapshots.
+
+## 3. Start the eight-GPU service
+
+Create a reusable launcher with the public LoRA, Cache-DiT, torch.compile and TP2+Ulysses4 enabled by default. Compilation caches live under `H3_HOME` and can be reused with compatible software, hardware and shapes; new shapes or dependency changes may trigger compilation again.
+
+```bash
+cat > "$H3_HOME/serve-h3.sh" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+H3_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+export SGLANG_CACHE_DIT_ENABLED="${SGLANG_CACHE_DIT_ENABLED:-true}"
+export TORCHINDUCTOR_CACHE_DIR="$H3_HOME/compile-cache/torchinductor"
+export TRITON_CACHE_DIR="$H3_HOME/compile-cache/triton"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" "$H3_HOME/outputs"
+
+args=(serve --model-path "$H3_HOME/models/MiniMax-H3"
+  --model-variant "${MODEL_VARIANT:-fl2va}"
+  --num-gpus 8 --tp-size 2 --ulysses-degree 4
+  --attention-backend "${ATTENTION_BACKEND:-sage_attn}"
+  --performance-mode speed --host 127.0.0.1 --port "${PORT:-30010}"
+  --output-path "$H3_HOME/outputs")
+if [[ "${ENABLE_COMPILE:-1}" == 1 ]]; then
+  args+=(--enable-torch-compile)
+else
+  args+=(--enable-torch-compile false)
+fi
+if [[ "${USE_LORA:-1}" == 1 ]]; then
+  args+=(--lora-path "$H3_HOME/models-lora"
+    --lora-weight-name "${LORA_FILE:-minimax_h3_turbo_v4_step600_ema.safetensors}"
+    --lora-nickname turbo --lora-scale 1.0 --lora-merge-mode auto)
+fi
+exec "$H3_HOME/venv/bin/sglang" "${args[@]}"
+BASH
+chmod +x "$H3_HOME/serve-h3.sh"
+"$H3_HOME/serve-h3.sh" 2>&1 | tee "$H3_HOME/server.log"
+```
+
+Initial requests may spend several minutes compiling. Check the logs for successful model/LoRA loading and actual SageAttention selection. After the health check succeeds, warm up your common durations and landscape/portrait shapes. The service listens on loopback; remote access should use an authenticated gateway with model-management routes restricted.
+
+## 4. Submit, measure and download a video
+
+In a second terminal, restore the environment and create a five-second landscape request with four inference steps after the service is ready:
+
+```bash
+export H3_HOME="$HOME/h3-lightning"
+source "$H3_HOME/venv/bin/activate"
+curl --fail --show-error http://127.0.0.1:30010/health
+
+cat > "$H3_HOME/request.json" <<'JSON'
+{
   "model": "MiniMaxAI/MiniMax-H3",
-  "prompt": "a dancer performing on a live stream",
-  "seconds": 15,
   "task": "t2va",
+  "prompt": "A dancer performs a flowing routine in a bright studio, full body shot, smooth camera movement.",
   "conditions": [],
-  "target": {"short_edge": 768, "aspect_ratio": "9:16", "duration_seconds": 15.0},
+  "target": {"short_edge": 768, "aspect_ratio": "16:9", "duration_seconds": 5.0},
   "num_inference_steps": 4,
-  "flow_shift": 12.0, "audio_flow_shift": 3.0, "seed": 20260904
-}'
-# Poll GET /v1/videos/{id}, download via GET /v1/videos/{id}/content
+  "flow_shift": 12.0,
+  "audio_flow_shift": 3.0,
+  "seed": 20260904
+}
+JSON
 ```
 
-- `task`: `t2va` (text) / `fl2va` (keyframes, conditions carry `role=keyframe`) / `ref2va` (references, conditions carry `role=reference`).
-- Durations snap up to the 17n+5 frame lattice at fixed 24fps: 15s→362 frames, 8s→192 frames exact.
-- ref2va requests must go to a `--model-variant ref2va` instance.
+For a 15-second portrait video, set `target.duration_seconds` to `15.0` and `target.aspect_ratio` to `"9:16"`. Start with 4 steps; try 8 for fast or large motions and follow the selected LoRA's recommendations. Set duration through `target.duration_seconds`; do not also pass `fps` or `num_frames`. H3 uses fixed 24 fps and `17n+5` frame buckets: 5 seconds aligns to 124 frames, and 15 seconds to 362 frames.
 
-## 📄 License
+This client submits a job, polls with a deadline, checks HTTP errors and validates that the downloaded file contains both video and audio. Each run saves its request, final response, metrics and ffprobe output:
 
-- Code in this repo: Apache 2.0
-- The MiniMax-H3 model weights follow the [MiniMax-H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3)
-- Referenced acceleration LoRAs follow their respective licenses
+```bash
+cat > "$H3_HOME/generate.py" <<'PY'
+import json, os, shutil, subprocess, sys, time, uuid
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
-## 🔗 Links
+base = os.environ.get("BASE", "http://127.0.0.1:30010").rstrip("/")
+payload = json.loads(Path(sys.argv[1]).read_text())
+run_dir = Path(__file__).resolve().parent / "runs" / uuid.uuid4().hex
+run_dir.mkdir(parents=True)
+(run_dir / "request.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
-[![RunningHub China](https://img.shields.io/badge/RunningHub-China-2F80ED)](https://www.runninghub.cn/?inviteCode=rh-v1367)
-[![RunningHub International](https://img.shields.io/badge/RunningHub-International-7B61FF)](https://www.runninghub.ai/?inviteCode=rh-v1367)
+def api(path, data=None):
+    body = None if data is None else json.dumps(data).encode()
+    request = Request(base + path, data=body, headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=600 if data is not None else 30) as response:
+        return json.load(response)
 
-- [sgl-project/sglang](https://github.com/sgl-project/sglang) (pinned at `f8cbf000f4a5` for this solution)
-- [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)
-- [larryvrh/MiniMax-H3-Turbo-Lora](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora) / [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo)
-- [SageAttention](https://github.com/thu-ml/SageAttention)
+started = time.monotonic()
+job = api("/v1/videos", payload)  # Do not retry POST: a timeout may still have created a job.
+job_id = job["id"]
+deadline = started + 1800
+while True:
+    (run_dir / "job.json").write_text(json.dumps(job, ensure_ascii=False, indent=2))
+    if job["status"] == "completed":
+        break
+    if job["status"] in {"failed", "error", "cancelled", "deleted"}:
+        raise RuntimeError(f"Job {job_id}: {job}")
+    if time.monotonic() >= deadline:
+        raise TimeoutError(f"Job {job_id}; inspect {base}/v1/videos/{job_id}")
+    time.sleep(2)
+    try:
+        job = api(f"/v1/videos/{job_id}")
+    except HTTPError as error:
+        if error.code not in {429, 500, 502, 503, 504}:
+            raise
+    except URLError:
+        pass  # GET failures retry within the overall deadline.
 
-## 🙏 Acknowledgements
+metrics = {"inference_time_s": job.get("inference_time_s"),
+           "peak_memory_mb": job.get("peak_memory_mb"),
+           "submit_to_completed_s": time.monotonic() - started}
+(run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+partial = run_dir / "video.partial.mp4"
+try:
+    with urlopen(base + f"/v1/videos/{job_id}/content", timeout=120) as response:
+        with partial.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format",
+                            "-of", "json", str(partial)], check=True, capture_output=True, text=True)
+    media = json.loads(probe.stdout)
+    kinds = {stream.get("codec_type") for stream in media["streams"]}
+    if not {"video", "audio"} <= kinds:
+        raise RuntimeError("Expected both video and audio streams")
+    (run_dir / "ffprobe.json").write_text(probe.stdout)
+    partial.replace(run_dir / "video.mp4")
+finally:
+    partial.unlink(missing_ok=True)
+print(json.dumps({"id": job_id, "output": str(run_dir), **metrics}, indent=2))
+PY
+python "$H3_HOME/generate.py" "$H3_HOME/request.json"
+```
 
-- [sgl-project/sglang](https://github.com/sgl-project/sglang) — multimodal_gen engine and multi-GPU parallelism
-- [MiniMax](https://huggingface.co/MiniMaxAI) — the open-source MiniMax-H3 model
-- [lightx2v](https://huggingface.co/lightx2v) / [larryvrh](https://huggingface.co/larryvrh) — open-source acceleration LoRAs
-- [thu-ml/SageAttention](https://github.com/thu-ml/SageAttention) — attention kernel acceleration
+The video is saved to `$H3_HOME/runs/<run-id>/video.mp4`. `inference_time_s` is the server-reported generation time; `submit_to_completed_s` includes submission, queueing and polling delay. Report them separately. `peak_memory_mb` is a server-reported metric; a missing value is not zero. Collect GPU-level monitoring separately for per-device peak memory.
 
----
+## 5. Generate from reference images
 
-## Closing notes
+The `fl2va` partition serves `t2va` and keyframe tasks. `ref2va` requires its own partition and matching LoRA; a loaded instance cannot switch partitions per request. Stop the original service and release all eight GPUs before starting this reference-image example:
 
-This recipe boils down to two moves: **do less computation, then make the remaining computation faster.** Step distillation decides "how much"; SageAttention2, Cache-DiT and torch.compile decide "how fast"; TP2+Ulysses4 decides how PCIe-only cards cooperate. The pieces are independent — adopt them step by step based on your hardware and quality bar.
+```bash
+hf download lightx2v/Minimax-h3-Turbo \
+  minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors \
+  --revision 2f015e66b37c585cea9dc4ae6f1850ea8788e742 \
+  --local-dir "$H3_HOME/models-lora"
 
-We will keep refining the reproduction notes toward "checkable configs with matching results". Numbers vary across GPUs, drivers and model versions — trust your own A/B tests. Issues and ideas are welcome.
+MODEL_VARIANT=ref2va \
+LORA_FILE=minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors \
+  "$H3_HOME/serve-h3.sh" 2>&1 | tee "$H3_HOME/server-ref2va.log"
+```
 
-**Faster feedback for creators, clearer methods for developers.**
+Save the following as `$H3_HOME/request-ref2va.json`, replace both URIs with **absolute paths to existing reference images on the server**, then run `python "$H3_HOME/generate.py" "$H3_HOME/request-ref2va.json"`. This public example uses an eight-step Ref2V LoRA; its configuration differs from the four-step internal measurement above.
 
----
+```json
+{
+  "model": "MiniMaxAI/MiniMax-H3",
+  "task": "ref2va",
+  "prompt": "The character in reference image 1 walks through the setting in reference image 2, cinematic tracking shot.",
+  "conditions": [
+    {"type": "image", "uri": "file:///absolute/server/path/reference-1.png", "role": "reference"},
+    {"type": "image", "uri": "file:///absolute/server/path/reference-2.png", "role": "reference"}
+  ],
+  "target": {"short_edge": 768, "aspect_ratio": "9:16", "duration_seconds": 15.0},
+  "num_inference_steps": 8,
+  "flow_shift": 12.0,
+  "audio_flow_shift": 3.0,
+  "seed": 20260904
+}
+```
 
-*Test notes: data from technical tests in September 2026. The ~12× speedup refers to a 4× RTX 6000D, 5-second, 1344×768 text-to-video benchmark against a BF16 50-step baseline and includes the step-count change; the 15-second portrait numbers are 8× RTX 6000D at 4 steps. All latencies are post-warmup generation times and exclude queueing; results vary with task and settings.*
+For first/last-frame generation, use `task: "fl2va"`, `role: "keyframe"`, and `frame_index: 0` for the first frame or `-1` for the last. Set the target `aspect_ratio` to `"auto"` so geometry is derived from keyframes. See the [MiniMax H3 model documentation](https://huggingface.co/MiniMaxAI/MiniMax-H3) for native input specifications.
+
+## 6. Measure on your hardware
+
+1. Fix the base/LoRA revisions, prompt, seed, duration, resolution and reference assets. The prompt above is a runnable example, not the historical benchmark prompt.
+2. Start each configuration separately and wait for loading and compilation to finish. Warm up the same shape, then run at least five measurements; retain individual results, generated videos and the median.
+3. Save launch environment variables, server logs, request JSON, model hashes, dependency records and GPU topology. Calculate speedup using the same timing definition for both configurations.
+4. Compare detail, subjects, motion, audio and synchronization before accepting a faster configuration for your workload.
+
+For example, after stopping the accelerated service, launch the following BF16/Flash Attention baseline without LoRA, Cache-DiT or compile, and set `num_inference_steps` to 50 in the request. Compare against the default launcher at your LoRA's recommended step count. This defines a local public-LoRA comparison; it is not automatically the same experiment as the RH-weight measurements above.
+
+```bash
+USE_LORA=0 ENABLE_COMPILE=0 SGLANG_CACHE_DIT_ENABLED=false ATTENTION_BACKEND=fa \
+  "$H3_HOME/serve-h3.sh" 2>&1 | tee "$H3_HOME/server-baseline.log"
+```
+
+To measure the LoRA's contribution alone, change `USE_LORA=0` above to `USE_LORA=1` and use four request steps. For the full configuration, use the default launcher from section 3 with four steps. Stop the previous instance before each configuration change and keep the inputs identical.
+
+Keep the actual attention backend reported in the server logs and check for dependency-related fallbacks. If `nvcc` is missing, check `CUDA_HOME`; if `cache_dit` is missing, check the diffusion extra; if a task is rejected for its partition, check `MODEL_VARIANT`. Separate loading and compilation time from steady generation latency.
+
+## License and acknowledgements
+
+Repository code is licensed under [Apache 2.0](./LICENSE). MiniMax H3 base weights follow their [Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3). Refer to each LoRA repository for its usage terms.
+
+Thanks to [MiniMax](https://huggingface.co/MiniMaxAI/MiniMax-H3), [SGLang](https://github.com/sgl-project/sglang), [SageAttention](https://github.com/thu-ml/SageAttention), [Cache-DiT](https://github.com/vipshop/cache-dit), [larryvrh](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora) and [LightX2V](https://huggingface.co/lightx2v/Minimax-h3-Turbo) for their open-source work.
+
+Try RunningHub: [China](https://www.runninghub.cn/?inviteCode=rh-v1367) · [Global](https://www.runninghub.ai/?inviteCode=rh-v1367). For reproduction issues, include hardware, version records, the launch command, a sanitized request and error logs.
