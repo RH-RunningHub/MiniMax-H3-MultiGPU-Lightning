@@ -64,7 +64,35 @@ The backbone uses **BF16 weights**, without INT8/NVFP4 weight quantization; comp
 | System tools | `nvcc`, a C++ compiler, `ffmpeg`, `ffprobe` |
 | Disk | Approximately 354 GB for the base model, plus space for LoRAs, compilation caches and generated videos |
 
-Existing eight-GPU TP2+U4 measurements report approximately 60–66 GiB peak memory per GPU. Usage varies with task, shape and compilation state; validate capacity and performance separately on other hardware.
+### Measured hardware parameters (from `nvidia-smi`)
+
+The following are measured records from the validation environment (Ubuntu 22.04.5, driver 580.95.05 / CUDA 13.0) — not an official spec sheet; values may vary slightly across batches/drivers, so save your own `nvidia-smi -q` output before deploying:
+
+| Item | Measured value |
+|---|---|
+| GPU model | NVIDIA RTX 6000D (Blackwell, `sm_120`) |
+| Per-GPU memory (`nvidia-smi` usable) | 85,651 MiB |
+| GPU power limit | 600 W (default 600 W, adjustable minimum 200 W) |
+| Interface / interconnect | PCIe Gen5 x16, no NVLink |
+| Max clocks | SM 2430 MHz / memory 12,481 MHz |
+| Inter-GPU topology | 8 GPUs across two NUMA domains (peer GPUs `NODE`, cross-domain `SYS`) |
+| CPU | 2× AMD EPYC 9354 (32 cores, 128 threads total) |
+| Host memory | 1007 GiB |
+
+### Measured software versions
+
+| Component | Version |
+|---|---|
+| SGLang | bundled snapshot `f8cbf000f4a5` (see [pin notes](./sglang/RH-PIN.md)) |
+| PyTorch | 2.13.0+cu130 |
+| Diffusers | 0.37.0 |
+| Cache-DiT | 1.3.0 |
+| SageAttention | 2.2.0 |
+| FlashInfer | 0.6.18 |
+| Triton | 3.7.1 |
+| Transformers | 5.12.1 |
+
+Existing eight-GPU TP2+U4 measurements report approximately 60–66 GiB peak memory per GPU; the 4-GPU reference environment recorded: BF16 50-step 57.1 GiB/card, INT8-ConvRot 36.8 GiB/card, NVFP4 33.2 GiB/card, and the final serving configuration (turbo LoRA + SageAttention2 + Cache-DiT + torch.compile) 37.3 GiB/card. Usage varies with task, shape and compilation state; validate capacity and performance separately on other hardware.
 
 ## 1. Install the inference environment
 

@@ -64,7 +64,35 @@ RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任
 | 系统工具 | `nvcc`、C++ 编译器、`ffmpeg`、`ffprobe` |
 | 磁盘 | 基座模型约 354 GB，另外预留 LoRA、编译缓存及输出视频空间 |
 
-8 卡 TP2+U4 配置的已有峰值显存记录约为 60–66 GiB/卡，实际值随任务、shape 与编译状态变化。其他硬件应单独验证容量和性能。
+### 实测硬件参数（来自 `nvidia-smi`）
+
+以下为验证环境的实测记录（Ubuntu 22.04.5，驱动 580.95.05 / CUDA 13.0），非官方规格表；不同批次/驱动可能略有差异，部署前建议同样保存 `nvidia-smi -q` 输出：
+
+| 项目 | 实测值 |
+|---|---|
+| GPU 型号 | NVIDIA RTX 6000D（Blackwell，`sm_120`） |
+| 单卡显存（`nvidia-smi` 可用口径） | 85,651 MiB |
+| 显卡功耗上限 | 600 W（默认 600 W，可调下限 200 W） |
+| 接口 / 互联 | PCIe Gen5 x16，无 NVLink |
+| 最大时钟 | SM 2430 MHz / 显存 12,481 MHz |
+| 卡间拓扑 | 8 卡分属两个 NUMA 域（同域卡间 `NODE`，跨域 `SYS`） |
+| CPU | 2× AMD EPYC 9354（32 核，共 128 线程） |
+| 内存 | 1007 GiB |
+
+### 实测软件版本
+
+| 组件 | 版本 |
+|---|---|
+| SGLang | 内嵌快照 `f8cbf000f4a5`（见 [版本记录](./sglang/RH-PIN.md)） |
+| PyTorch | 2.13.0+cu130 |
+| Diffusers | 0.37.0 |
+| Cache-DiT | 1.3.0 |
+| SageAttention | 2.2.0 |
+| FlashInfer | 0.6.18 |
+| Triton | 3.7.1 |
+| Transformers | 5.12.1 |
+
+8 卡 TP2+U4 配置的已有峰值显存记录约为 60–66 GiB/卡；4 卡对照环境的记录为：BF16 50 步 57.1 GiB/卡、INT8-ConvRot 36.8 GiB/卡、NVFP4 33.2 GiB/卡、定型配置（turbo LoRA + SageAttention2 + Cache-DiT + torch.compile）37.3 GiB/卡。实际值随任务、shape 与编译状态变化。其他硬件应单独验证容量和性能。
 
 ## 1. 安装推理环境
 
