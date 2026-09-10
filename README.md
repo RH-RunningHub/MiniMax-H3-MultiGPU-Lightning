@@ -64,9 +64,7 @@ The backbone uses **BF16 weights**, without INT8/NVFP4 weight quantization; comp
 | System tools | `nvcc`, a C++ compiler, `ffmpeg`, `ffprobe` |
 | Disk | Approximately 354 GB for the base model, plus space for LoRAs, compilation caches and generated videos |
 
-> 🟩 Sections marked with 🟩 below are the newly added measured-parameter supplements.
-
-### 🟩 Measured hardware parameters (from `nvidia-smi`)
+### Measured hardware parameters (from `nvidia-smi`)
 
 The following are measured records from the validation environment (Ubuntu 22.04.5, driver 580.95.05 / CUDA 13.0) — not an official spec sheet; values may vary slightly across batches/drivers, so save your own `nvidia-smi -q` output before deploying:
 
@@ -81,7 +79,7 @@ The following are measured records from the validation environment (Ubuntu 22.04
 | CPU | 2× AMD EPYC 9354 (32 cores, 128 threads total) |
 | Host memory | 1007 GiB |
 
-### 🟩 Measured software versions
+### Measured software versions
 
 | Component | Version |
 |---|---|
@@ -94,7 +92,7 @@ The following are measured records from the validation environment (Ubuntu 22.04
 | Triton | 3.7.1 |
 | Transformers | 5.12.1 |
 
-🟩 Existing eight-GPU TP2+U4 measurements report approximately 60–66 GiB peak memory per GPU; the 4-GPU reference environment recorded: BF16 50-step 57.1 GiB/card, INT8-ConvRot 36.8 GiB/card, NVFP4 33.2 GiB/card, and the final serving configuration (turbo LoRA + SageAttention2 + Cache-DiT + torch.compile) 37.3 GiB/card. Usage varies with task, shape and compilation state; validate capacity and performance separately on other hardware.
+Existing eight-GPU TP2+U4 measurements report approximately 60–66 GiB peak memory per GPU; the 4-GPU reference environment recorded: BF16 50-step 57.1 GiB/card, INT8-ConvRot 36.8 GiB/card, NVFP4 33.2 GiB/card, and the final serving configuration (turbo LoRA + SageAttention2 + Cache-DiT + torch.compile) 37.3 GiB/card. Usage varies with task, shape and compilation state; validate capacity and performance separately on other hardware.
 
 ## 1. Install the inference environment
 
