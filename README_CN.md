@@ -64,7 +64,9 @@ RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任
 | 系统工具 | `nvcc`、C++ 编译器、`ffmpeg`、`ffprobe` |
 | 磁盘 | 基座模型约 354 GB，另外预留 LoRA、编译缓存及输出视频空间 |
 
-### 实测硬件参数（来自 `nvidia-smi`）
+> 🟩 以下带 🟩 标记的内容为本次新增的实测参数补充。
+
+### 🟩 实测硬件参数（来自 `nvidia-smi`）
 
 以下为验证环境的实测记录（Ubuntu 22.04.5，驱动 580.95.05 / CUDA 13.0），非官方规格表；不同批次/驱动可能略有差异，部署前建议同样保存 `nvidia-smi -q` 输出：
 
@@ -79,7 +81,7 @@ RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任
 | CPU | 2× AMD EPYC 9354（32 核，共 128 线程） |
 | 内存 | 1007 GiB |
 
-### 实测软件版本
+### 🟩 实测软件版本
 
 | 组件 | 版本 |
 |---|---|
@@ -92,7 +94,7 @@ RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任
 | Triton | 3.7.1 |
 | Transformers | 5.12.1 |
 
-8 卡 TP2+U4 配置的已有峰值显存记录约为 60–66 GiB/卡；4 卡对照环境的记录为：BF16 50 步 57.1 GiB/卡、INT8-ConvRot 36.8 GiB/卡、NVFP4 33.2 GiB/卡、定型配置（turbo LoRA + SageAttention2 + Cache-DiT + torch.compile）37.3 GiB/卡。实际值随任务、shape 与编译状态变化。其他硬件应单独验证容量和性能。
+🟩 8 卡 TP2+U4 配置的已有峰值显存记录约为 60–66 GiB/卡；4 卡对照环境的记录为：BF16 50 步 57.1 GiB/卡、INT8-ConvRot 36.8 GiB/卡、NVFP4 33.2 GiB/卡、定型配置（turbo LoRA + SageAttention2 + Cache-DiT + torch.compile）37.3 GiB/卡。实际值随任务、shape 与编译状态变化。其他硬件应单独验证容量和性能。
 
 ## 1. 安装推理环境
 
