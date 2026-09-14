@@ -1,0 +1,32 @@
+{
+  "measured_date": "2026-09-11",
+  "repository_commit": "5d1401228680ca635dac463825f71c3fbd681ef7",
+  "source": "retained completed-request metrics and ffprobe report, read back 2026-09-14",
+  "inference_time_s": 135.6365660839947,
+  "submit_to_completed_s": 138.29596197599312,
+  "reported_peak_memory_mb": 62246.0,
+  "sampled_gpu_peak_memory_mib": [
+    66475,
+    64381,
+    64781,
+    64887,
+    64781,
+    66273,
+    66295,
+    63911
+  ],
+  "video": {
+    "codec": "h264",
+    "width": 1344,
+    "height": 768,
+    "fps": 24,
+    "frames": 362,
+    "duration_s": 15.083333
+  },
+  "audio": {
+    "codec": "aac",
+    "sample_rate": 32000,
+    "channels": 2,
+    "duration_s": 15.075
+  }
+}

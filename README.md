@@ -39,6 +39,8 @@ A separate eight-GPU parallelism comparison reduced 15-second text-to-video late
 
 These measurements describe specific test configurations. Public LoRAs, prompts and reference images in the instructions below affect both speed and output; retain generated videos and the full configuration when comparing runs.
 
+A community [eight RTX PRO 5000 72GB measurement](docs/benchmarks/rtx-pro-5000-turbo-v4/README.md) includes the exact public-Turbo-v4 request, configuration and timing scopes for a 15-second T2VA request.
+
 ## Acceleration approach and release scope
 
 | Layer | Method | Purpose |

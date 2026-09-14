@@ -1,0 +1,15 @@
+{
+  "model": "MiniMaxAI/MiniMax-H3",
+  "task": "t2va",
+  "prompt": "A 15-second photorealistic live-action short-drama close-up at blue hour in a rain-soaked coastal train station. An original adult East Asian woman in her early thirties fills most of the frame from the shoulders up. She has natural facial proportions, realistic unretouched skin texture with visible pores and fine detail, damp shoulder-length black hair, and a charcoal wool coat. She is not a celebrity and does not resemble any known person.\n\nThe camera makes one slow, steady push-in from a close three-quarter view to a tight facial close-up. She looks down at a small weathered red notebook, then raises her eyes toward someone off camera; her expression shifts subtly from guarded fatigue to quiet recognition. She blinks naturally, breathes softly, and a cool sea wind moves only a few strands of wet hair. Warm platform light travels gently across her cheeks while cool rainy ambience remains in the background as soft bokeh.\n\nGrounded contemporary drama, physically believable lighting, stable identity, coherent anatomy, realistic eyes and teeth, natural skin microtexture, temporally stable facial details, realistic wet hair and tiny raindrops, cinematic dynamic range. No beauty filter, no skin smoothing, no waxy or plastic skin, no heavy makeup, no glamour retouching, no illustration, no anime, no text, no logo, no subtitles, no cutaways, no wide shot.",
+  "conditions": [],
+  "target": {
+    "short_edge": 768,
+    "aspect_ratio": "16:9",
+    "duration_seconds": 15.0
+  },
+  "num_inference_steps": 4,
+  "flow_shift": 12.0,
+  "audio_flow_shift": 3.0,
+  "seed": 1101
+}
