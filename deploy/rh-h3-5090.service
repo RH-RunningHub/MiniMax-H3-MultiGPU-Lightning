@@ -1,0 +1,19 @@
+[Unit]
+Description=MiniMax-H3 INT8 API (8x RTX 5090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/MiniMax-H3-MultiGPU-Lightning
+EnvironmentFile=-/etc/rh-h3-5090.env
+ExecStart=/opt/MiniMax-H3-MultiGPU-Lightning/scripts/start-5090-int8.sh
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=1800
+TimeoutStopSec=120
+KillSignal=SIGTERM
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

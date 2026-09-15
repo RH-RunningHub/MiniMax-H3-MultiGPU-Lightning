@@ -12,6 +12,8 @@ H3 Lightning 是 RunningHub 面向 MiniMax H3 的推理加速方案。在 **8× 
 
 本仓库公开加速技术路线、固定版本的 SGLang 推理源码，以及从环境安装、权重下载到视频生成和性能记录的操作步骤，帮助开发者在自己的多卡环境中部署和评估 H3 Lightning。
 
+> **RTX 5090 INT8 API 部署：**请查看 [8× RTX 5090 部署指南](./docs/RTX5090_INT8_API_DEPLOYMENT.md)。其中包含剪枝 INT8 DiT、NVFP4 文本编码器、comfy-kitchen 注意力、systemd 服务和四种实测组件放置策略；目标规格为 15 秒/362 帧、20 次完整去噪，不使用 LoRA 或 Cache-DiT 近似。
+
 ## 性能结果
 
 ### 5 秒文生视频：8 卡对照

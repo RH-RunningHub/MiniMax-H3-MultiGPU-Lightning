@@ -1,5 +1,6 @@
-# 敏感文件（仅根目录）
-/.env
+# 敏感文件
+.env
+*.env
 /*.key
 /*.pem
 /config.json
@@ -9,19 +10,30 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
-# 大文件不入库（仅根目录）
+# 大文件和运行时目录不入库（仅根目录）
 /*.pth
 /*.ckpt
 /*.safetensors
 /*.bin
 /models/
+/models-*/
 /weights/
+/compile-cache/
+/hf-cache/
+/outputs/
+/runs/
+/venv/
+/dlvenv/
+/inputs/uploads/
 
 # OS / IDE / 日志
 .DS_Store
 Thumbs.db
 *.log
 *.tmp
+*.mp4
+*.webm
+*.avi
 .idea/
 .vscode/
 node_modules/

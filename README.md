@@ -12,6 +12,8 @@ H3 Lightning is RunningHub's inference acceleration recipe for MiniMax H3. In a 
 
 This repository publishes the acceleration approach, a pinned SGLang source snapshot, and instructions covering installation, model downloads, video generation and measurement so developers can deploy and evaluate the recipe on their own multi-GPU systems.
 
+> **RTX 5090 INT8 API deployment:** see the [8× RTX 5090 deployment guide](./docs/RTX5090_INT8_API_DEPLOYMENT.md) for the pruned INT8 DiT, NVFP4 text encoder, comfy-kitchen attention, systemd unit and four measured component-placement profiles. This profile runs 15-second/362-frame generation with 20 full denoising steps and no LoRA or Cache-DiT approximation.
+
 ## Performance results
 
 ### 5-second text-to-video: eight-GPU comparison
