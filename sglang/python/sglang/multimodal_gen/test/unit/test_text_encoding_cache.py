@@ -95,6 +95,7 @@ def test_component_uses_exact_encoder_precision():
         ("text_encoder", None),
         ("text_encoder_2", torch.float32),
     ]
+    assert all(use.memory_intensive for use in uses)
 
 
 def test_negative_text_cache_skips_warmup():

@@ -178,6 +178,11 @@ class TextEncodingStage(ConditionEncodingStage):
                 stage_name=stage_name,
                 component_name="text_encoder" if i == 0 else f"text_encoder_{i + 1}",
                 preferred_ready_after_request=i == 0,
+                # A component-offloaded text encoder can leave a large CUDA
+                # allocator reserve behind after its weights move to CPU.
+                # Mark it as memory-intensive so the residency manager returns
+                # that cache before the denoiser needs the device.
+                memory_intensive=True,
                 target_dtype=resolve_component_precision_override(
                     server_args,
                     "text_encoder" if i == 0 else f"text_encoder_{i + 1}",

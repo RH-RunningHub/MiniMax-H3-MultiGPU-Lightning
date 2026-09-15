@@ -173,6 +173,20 @@ def _make_text_row_linear(
         use_row_parallel = quant_config.supports_input_partition(
             prefix, in_features // tp_size
         )
+        if use_row_parallel:
+            # Do NOT take the partitioned path for a quantized checkpoint here:
+            # it silently produces a wrong result, which destroys the text
+            # conditioning. Measured TP2 vs TP1 on layer 0 of this encoder:
+            # mlp output norm 23.81 vs 38.99 (-39%) and the attention output
+            # 12.29 vs 12.62; end to end, a "pitch black" and a "blinding
+            # white" prompt produced identical luminance (~68) instead of a
+            # ~200 level difference, i.e. the prompt had no effect at all.
+            # Using the replicated quantized linear instead is exact: the
+            # callers gather the sharded activation via
+            # _gather_tensor_parallel_activation() whenever the layer is not
+            # row-parallel, and the layer-0 activations then match TP1
+            # bit-for-bit (0.6336 / 12.6198 / 38.9869 / 45.3137).
+            use_row_parallel = False
     if use_weight_only_fp8:
         if use_row_parallel:
             return WeightOnlyFP8RowParallelLinear(

@@ -1899,6 +1899,11 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             return
         # prepare for first real request: restore the user-configured residency
         for module in self._offloaded_dit_modules_for_compile:
+            # Compile warmup must not override an explicitly requested
+            # steady-state layerwise placement. disable_offload() materializes
+            # every layer and can OOM before the first real request.
+            if self.server_args.dit_layerwise_offload:
+                continue
             module.disable_offload()
         # clear the list for avoid overhead during real request
         self._offloaded_dit_modules_for_compile.clear()

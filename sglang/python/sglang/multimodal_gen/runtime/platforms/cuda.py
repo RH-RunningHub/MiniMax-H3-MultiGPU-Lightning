@@ -182,6 +182,41 @@ class _SageAttentionBackendResolver(_CudaAttentionBackendResolver):
             return AttentionBackendEnum.FA
 
 
+class _CkInt8AttentionBackendResolver(_CudaAttentionBackendResolver):
+    """comfy-kitchen INT8 注意力（Comfy Kitchen Attention）。"""
+
+    backend = AttentionBackendEnum.CK_INT8_ATTN
+
+    @classmethod
+    def resolve(cls, platform) -> str | AttentionBackendEnum:
+        try:
+            import comfy_kitchen  # noqa: F401
+        except ImportError:
+            logger.info(
+                "comfy-kitchen is not installed (pip install 'comfy-kitchen>=0.2.30'). "
+                "Falling back to Flash Attention."
+            )
+            return AttentionBackendEnum.FA
+
+        if not comfy_kitchen.int8_attention_is_available():
+            logger.warning(
+                "comfy-kitchen INT8 attention kernel is unavailable on this device "
+                "(requires the compiled CUDA extension on SM75+). "
+                "Falling back to Flash Attention."
+            )
+            return AttentionBackendEnum.FA
+
+        try:
+            from sglang.multimodal_gen.runtime.layers.attention.backends.ck_int8_attn import (  # noqa: F401
+                CkInt8AttentionBackend,
+            )
+
+            return "sglang.multimodal_gen.runtime.layers.attention.backends.ck_int8_attn.CkInt8AttentionBackend"
+        except ImportError as exc:
+            logger.info("comfy-kitchen INT8 attention backend failed to import: %s", exc)
+            return AttentionBackendEnum.FA
+
+
 class _SageAttention3BackendResolver(_CudaAttentionBackendResolver):
     backend = AttentionBackendEnum.SAGE_ATTN_3
 
@@ -467,6 +502,7 @@ _CUDA_ATTENTION_BACKEND_RESOLVERS = {
         _SlidingTileAttentionBackendResolver,
         _SageAttentionBackendResolver,
         _SageAttention3BackendResolver,
+        _CkInt8AttentionBackendResolver,
         _SpargeAttentionBackendResolver,
         _VideoSparseAttentionBackendResolver,
         _VideoSparseAttentionH3BackendResolver,
