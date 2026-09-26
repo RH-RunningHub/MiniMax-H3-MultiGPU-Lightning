@@ -22,3 +22,16 @@ Notes for this pin:
   offload race fix (#40621), and a 400 response for corrupt image inputs
   (#28131). Mamba2 `selective_state_update` speedup for B200 (#41196-class)
   is included but its 6000D benefit is untested.
+
+Performance disclaimer for this pin bump:
+
+- **No speedup is claimed or measured for this pin bump.** No A/B
+  benchmark was re-run for this snapshot change; the published latency
+  tables above remain valid only for the previous pin
+  (`f8cbf00`, 2026-09-02).
+- The items carried by this bump are upstream functional and
+  compatibility changes: PDD (#40568), SwiGLU fusion (#40378) and
+  `fp8_fa_sm120` (#40175) are enablers whose RTX 6000D gains, if any,
+  have not been measured; the Mamba2 speedup is B200-specific.
+- Re-run the solution's A/B benchmarks if you intend to claim numbers
+  on this pin.
