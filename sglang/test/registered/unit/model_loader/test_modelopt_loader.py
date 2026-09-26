@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig
@@ -21,7 +22,12 @@ from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.layers.linear import ReplicatedLinear
 from sglang.srt.layers.logits_processor import should_apply_lm_head_quant_method
 from sglang.srt.layers.modelopt_utils import QUANT_CFG_CHOICES
-from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
+from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
+from sglang.srt.layers.quantization.fp8 import (
+    Fp8Config,
+    Fp8LinearMethod,
+    Fp8MoEMethod,
+)
 from sglang.srt.layers.quantization.modelopt_quant import (
     ModelOptFp4Config,
     ModelOptFp4LinearMethod,
@@ -34,8 +40,13 @@ from sglang.srt.model_loader.loader import (
     ModelOptModelLoader,
     get_model_loader,
 )
-from sglang.srt.model_loader.weight_utils import get_quant_config
+from sglang.srt.model_loader.weight_utils import (
+    _modelopt_quant_section,
+    get_quant_config,
+)
 from sglang.srt.models.minimax_m3 import MiniMaxM3SparseForCausalLM
+from sglang.srt.models.muse_glimmer import MuseGlimmerForConditionalGeneration
+from sglang.srt.models.nano_nemotron_vl import NemotronH_Omni_Reasoning_V3
 from sglang.srt.models.utils import WeightsMapper
 from sglang.srt.utils import get_device
 from sglang.test.ci.ci_register import register_cuda_ci
@@ -48,7 +59,7 @@ CALIBRATION_BATCH_SIZE = 36
 CALIBRATION_NUM_SAMPLES = 512
 DEFAULT_DEVICE = "cuda:0"
 
-register_cuda_ci(est_time=11, stage="base-b", runner_config="1-gpu-small")
+register_cuda_ci(est_time=13, stage="base-b", runner_config="1-gpu-small")
 
 
 class TestModelOptModelLoader(CustomTestCase):
@@ -71,9 +82,7 @@ class TestModelOptModelLoader(CustomTestCase):
         self.mock_logger.start()
 
         # Mock all distributed functions that might be called
-        self.mock_get_tp_group = patch(
-            "sglang.srt.distributed.parallel_state.get_tp_group"
-        )
+        self.mock_get_tp_group = patch("sglang.srt.distributed.parallel_state._TP")
         self.mock_get_tp_group.start()
 
         # Mock model parallel initialization check
@@ -206,194 +215,6 @@ class TestModelOptModelLoader(CustomTestCase):
                 # Note: We can't easily verify the exact calls due to dynamic imports,
                 # but we can verify the workflow completed successfully
 
-    @patch("sglang.srt.model_loader.loader.QUANT_CFG_CHOICES", QUANT_CFG_CHOICES)
-    @patch("sglang.srt.model_loader.loader.AutoTokenizer")
-    @patch("sglang.srt.model_loader.loader.logger")
-    def test_quantized_checkpoint_restore(self, mock_logger, mock_auto_tokenizer):
-        """Test restoring from a quantized checkpoint."""
-
-        # Create model config with checkpoint restore path
-        config_with_restore = ModelConfig(
-            model_path=self.model_path,
-            quantization="modelopt_fp8",
-        )
-
-        # Create load config with checkpoint restore path
-        load_config_with_restore = LoadConfig(
-            modelopt_checkpoint_restore_path="/path/to/quantized/checkpoint"
-        )
-
-        loader = ModelOptModelLoader(load_config_with_restore)
-
-        # Mock tokenizer
-        mock_tokenizer = MagicMock()
-        mock_auto_tokenizer.from_pretrained.return_value = mock_tokenizer
-
-        # Mock modelopt modules
-        mock_mtq = MagicMock()
-        mock_mto = MagicMock()
-
-        # Configure quantization config
-        mock_fp8_cfg = MagicMock()
-        mock_mtq.FP8_DEFAULT_CFG = mock_fp8_cfg
-
-        # Configure model as not quantized initially
-        mock_is_quantized = MagicMock(return_value=False)
-
-        with patch.object(
-            loader, "_load_modelopt_base_model", return_value=self.mock_base_model
-        ):
-            with patch.dict(
-                "sys.modules",
-                {
-                    "modelopt": MagicMock(),
-                    "modelopt.torch": MagicMock(),
-                    "modelopt.torch.opt": mock_mto,
-                    "modelopt.torch.quantization": mock_mtq,
-                    "modelopt.torch.quantization.utils": MagicMock(
-                        is_quantized=mock_is_quantized
-                    ),
-                },
-            ):
-                with patch.object(loader, "_setup_modelopt_quantization") as mock_setup:
-                    # Mock the _setup_modelopt_quantization to simulate checkpoint restore
-                    def mock_setup_quantization(
-                        model,
-                        tokenizer,
-                        quant_cfg,
-                        quantized_ckpt_restore_path=None,
-                        **kwargs,
-                    ):
-                        if quantized_ckpt_restore_path:
-                            mock_mto.restore(model, quantized_ckpt_restore_path)
-                            print(
-                                f"Restored quantized model from {quantized_ckpt_restore_path}"
-                            )
-                            return
-
-                    mock_setup.side_effect = mock_setup_quantization
-
-                    # Execute the load_model method
-                    result_model = loader.load_model(
-                        model_config=config_with_restore,
-                        device_config=self.device_config,
-                    )
-
-                    # Verify the setup was called with restore path
-                    mock_setup.assert_called_once()
-                    call_args = mock_setup.call_args
-                    # Check that the restore path was passed correctly
-                    self.assertIn("quantized_ckpt_restore_path", call_args[1])
-                    self.assertEqual(
-                        call_args[1]["quantized_ckpt_restore_path"],
-                        "/path/to/quantized/checkpoint",
-                    )
-
-                    # Verify restore was called
-                    mock_mto.restore.assert_called_once_with(
-                        self.mock_base_model, "/path/to/quantized/checkpoint"
-                    )
-
-                    # Verify we get the expected model back
-                    self.assertEqual(result_model, self.mock_base_model)
-
-    @patch("sglang.srt.model_loader.loader.QUANT_CFG_CHOICES", QUANT_CFG_CHOICES)
-    @patch("sglang.srt.model_loader.loader.AutoTokenizer")
-    @patch("sglang.srt.model_loader.loader.logger")
-    def test_quantized_checkpoint_save(self, mock_logger, mock_auto_tokenizer):
-        """Test saving quantized checkpoint after calibration."""
-
-        # Create model config with checkpoint save path
-        config_with_save = ModelConfig(
-            model_path=self.model_path,
-            quantization="modelopt_fp8",
-        )
-
-        # Create load config with checkpoint save path
-        load_config_with_save = LoadConfig(
-            modelopt_checkpoint_save_path="/path/to/save/checkpoint"
-        )
-
-        loader = ModelOptModelLoader(load_config_with_save)
-
-        # Mock tokenizer
-        mock_tokenizer = MagicMock()
-        mock_auto_tokenizer.from_pretrained.return_value = mock_tokenizer
-
-        # Mock modelopt modules
-        mock_mtq = MagicMock()
-        mock_mto = MagicMock()
-        mock_dataset_utils = MagicMock()
-
-        # Configure quantization config
-        mock_fp8_cfg = MagicMock()
-        mock_mtq.FP8_DEFAULT_CFG = mock_fp8_cfg
-
-        # Configure model as not quantized initially
-        mock_is_quantized = MagicMock(return_value=False)
-
-        with patch.object(
-            loader, "_load_modelopt_base_model", return_value=self.mock_base_model
-        ):
-            with patch.dict(
-                "sys.modules",
-                {
-                    "modelopt": MagicMock(),
-                    "modelopt.torch": MagicMock(),
-                    "modelopt.torch.opt": mock_mto,
-                    "modelopt.torch.quantization": mock_mtq,
-                    "modelopt.torch.quantization.utils": MagicMock(
-                        is_quantized=mock_is_quantized
-                    ),
-                    "modelopt.torch.utils": MagicMock(),
-                    "modelopt.torch.utils.dataset_utils": mock_dataset_utils,
-                },
-            ):
-                with patch.object(loader, "_setup_modelopt_quantization") as mock_setup:
-                    # Mock the _setup_modelopt_quantization to simulate checkpoint save
-                    def mock_setup_quantization(
-                        model,
-                        tokenizer,
-                        quant_cfg,
-                        quantized_ckpt_save_path=None,
-                        **kwargs,
-                    ):
-                        # Simulate calibration and quantization
-                        mock_mtq.quantize(model, quant_cfg, forward_loop=MagicMock())
-                        mock_mtq.print_quant_summary(model)
-
-                        # Save checkpoint if path provided
-                        if quantized_ckpt_save_path:
-                            mock_mto.save(model, quantized_ckpt_save_path)
-                            print(
-                                f"Quantized model saved to {quantized_ckpt_save_path}"
-                            )
-
-                    mock_setup.side_effect = mock_setup_quantization
-
-                    # Execute the load_model method
-                    result_model = loader.load_model(
-                        model_config=config_with_save, device_config=self.device_config
-                    )
-
-                    # Verify the setup was called with save path
-                    mock_setup.assert_called_once()
-                    call_args = mock_setup.call_args
-                    # Check that the save path was passed correctly
-                    self.assertIn("quantized_ckpt_save_path", call_args[1])
-                    self.assertEqual(
-                        call_args[1]["quantized_ckpt_save_path"],
-                        "/path/to/save/checkpoint",
-                    )
-
-                    # Verify save was called
-                    mock_mto.save.assert_called_once_with(
-                        self.mock_base_model, "/path/to/save/checkpoint"
-                    )
-
-                    # Verify we get the expected model back
-                    self.assertEqual(result_model, self.mock_base_model)
-
     def test_unified_quantization_flag_support(self):
         """Test that ModelOptModelLoader supports unified quantization flags."""
         # Test modelopt_fp8
@@ -412,6 +233,29 @@ class TestModelOptModelLoader(CustomTestCase):
         config_auto = ModelConfig(model_path=self.model_path, quantization="modelopt")
         # Should default to fp8 when no config is detected
         self.assertEqual(config_auto._get_modelopt_quant_type(), "fp8")
+
+    def test_quantize_and_serve_config_validation(self):
+        """Test that quantize_and_serve is properly disabled."""
+        # Test that quantize-and-serve mode raises NotImplementedError
+        with self.assertRaises(NotImplementedError) as context:
+            ModelConfig(
+                model_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                quantization="modelopt_fp8",
+                quantize_and_serve=True,
+            )
+
+        # Verify the error message contains helpful instructions
+        error_msg = str(context.exception)
+        self.assertIn("disabled due to compatibility issues", error_msg)
+        self.assertIn("separate quantize-then-deploy workflow", error_msg)
+
+        # Test invalid configuration - no quantization
+        with self.assertRaises(ValueError) as context:
+            ModelConfig(
+                model_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                quantize_and_serve=True,
+            )
+        self.assertIn("requires ModelOpt quantization", str(context.exception))
 
 
 class TestModelOptLoaderIntegration(CustomTestCase):
@@ -548,6 +392,21 @@ class TestParseQuantHfConfig(CustomTestCase):
                 self.assertIn("lm_head", quant_config.ignored_layers)
                 self.assertEqual(quant_config.kv_cache_quant_algo, "FP8")
 
+        nested_result = model_config._parse_modelopt_quant_config(
+            {
+                "quantization": {
+                    "quantization": {
+                        "quant_algo": "MXFP8",
+                        "group_size": 32,
+                        "exclude_modules": ["lm_head"],
+                    }
+                }
+            }
+        )
+        self.assertEqual(nested_result["quant_method"], "mxfp8")
+        self.assertEqual(nested_result["scale_fmt"], "ue8m0")
+        self.assertIn("lm_head", nested_result["modules_to_not_convert"])
+
     def test_modelopt_mxfp8_override(self):
         """Generic ModelOpt selection must not route MXFP8 to scalar FP8."""
         self.assertEqual(
@@ -657,7 +516,7 @@ class TestModelOptFp4LoaderSelection(CustomTestCase):
                     quantization="modelopt_fp4",
                     is_draft_model=True,
                     is_draft_quantization_explicit=is_explicit,
-                    hf_config=SimpleNamespace(
+                    hf_config=PretrainedConfig(
                         quantization_config={
                             "quant_algo": "NVFP4",
                             "group_size": 16,
@@ -696,6 +555,29 @@ class TestModelOptFp4LoaderSelection(CustomTestCase):
 
 
 class TestModelOptMixedPrecisionConfig(CustomTestCase):
+    def test_nemotron_h_omni_resolves_fused_qkv_from_split_layers(self):
+        quant_config = ModelOptMixedPrecisionConfig.from_config(
+            {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    f"language_model.model.layers.7.mixer.{projection}": {
+                        "quant_algo": "FP8"
+                    }
+                    for projection in ("q_proj", "k_proj", "v_proj")
+                },
+                "packed_modules_mapping": (
+                    NemotronH_Omni_Reasoning_V3.packed_modules_mapping
+                ),
+            }
+        )
+
+        self.assertEqual(
+            quant_config._resolve_quant_algo(
+                "language_model.model.layers.7.mixer.qkv_proj"
+            ),
+            "FP8",
+        )
+
     def test_fp8_pb_wo_dispatches_to_native_block_fp8(self):
         quant_config = ModelOptMixedPrecisionConfig.from_config(
             {
@@ -717,6 +599,55 @@ class TestModelOptMixedPrecisionConfig(CustomTestCase):
         self.assertEqual(method.quant_config.weight_block_size, [128, 128])
         self.assertTrue(method.quant_config.is_checkpoint_fp8_serialized)
         self.assertEqual(method.quant_config.activation_scheme, "dynamic")
+
+    def _block_fp8_moe_method(self, algo, group_size=128):
+        quant_config = ModelOptMixedPrecisionConfig.from_config(
+            {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "mtp.layers.0.mlp.experts": {
+                        "quant_algo": algo,
+                        "group_size": group_size,
+                    },
+                },
+                "packed_modules_mapping": {},
+            }
+        )
+        # Type dispatch only needs a FusedMoE instance; skip GPU weight setup.
+        layer = FusedMoE.__new__(FusedMoE)
+        return quant_config.get_quant_method(layer, "mtp.layers.0.mlp.experts")
+
+    def test_block_fp8_moe_dispatches_under_both_algo_names(self):
+        for algo in ("FP8_PB_WO", "FP8_BLOCK_SCALES"):
+            with self.subTest(algo=algo):
+                method = self._block_fp8_moe_method(algo)
+                self.assertIsInstance(method, Fp8MoEMethod)
+                self.assertEqual(method.quant_config.weight_block_size, [128, 128])
+                self.assertEqual(method.quant_config.activation_scheme, "dynamic")
+                self.assertTrue(method.quant_config.is_checkpoint_fp8_serialized)
+
+    def test_block_fp8_block_size_follows_checkpoint_group_size(self):
+        method = self._block_fp8_moe_method("FP8_BLOCK_SCALES", group_size=64)
+        self.assertEqual(method.quant_config.weight_block_size, [64, 64])
+
+    def test_block_fp8_conflicting_group_sizes_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "one group_size"):
+            ModelOptMixedPrecisionConfig.from_config(
+                {
+                    "quant_algo": "MIXED_PRECISION",
+                    "quantized_layers": {
+                        "mtp.layers.0.mlp.experts": {
+                            "quant_algo": "FP8_BLOCK_SCALES",
+                            "group_size": 128,
+                        },
+                        "model.layers.0.self_attn.q_proj": {
+                            "quant_algo": "FP8_PB_WO",
+                            "group_size": 64,
+                        },
+                    },
+                    "packed_modules_mapping": {},
+                }
+            )
 
     def test_incomplete_inline_config_falls_back_to_hf_quant_config_file(self):
         packed_modules_mapping = {
@@ -757,7 +688,7 @@ class TestModelOptMixedPrecisionConfig(CustomTestCase):
                 with self.subTest(inline_config=inline_config):
                     model_config = SimpleNamespace(
                         quantization="modelopt_mixed",
-                        hf_config=SimpleNamespace(
+                        hf_config=PretrainedConfig(
                             quantization_config=inline_config,
                         ),
                         model_path=model_path,
@@ -787,7 +718,7 @@ class TestModelOptMixedPrecisionConfig(CustomTestCase):
         }
         model_config = SimpleNamespace(
             quantization="modelopt_mixed",
-            hf_config=SimpleNamespace(
+            hf_config=PretrainedConfig(
                 quantization_config={
                     "quant_method": "modelopt_mixed",
                     "quant_algo": "MIXED_PRECISION",
@@ -870,6 +801,69 @@ class TestModelOptMixedPrecisionConfig(CustomTestCase):
             ["language_model.lm_head", "lm_head"],
         )
 
+    def test_muse_glimmer_mixed_precision_resolves_runtime_names(self):
+        """The vendor keys quant metadata under ``model.language_model.*``;
+        it must resolve for the ``model.*`` modules the runtime builds.
+        """
+        quant_config = ModelOptMixedPrecisionConfig.from_config(
+            {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.language_model.layers.0.mlp.gate_proj": {
+                        "quant_algo": "W4A16_NVFP4",
+                        "group_size": 16,
+                    },
+                    "model.language_model.layers.0.mlp.up_proj": {
+                        "quant_algo": "W4A16_NVFP4",
+                        "group_size": 16,
+                    },
+                    "model.language_model.layers.0.self_attn.q_proj": {
+                        "quant_algo": "FP8"
+                    },
+                    "model.language_model.layers.0.self_attn.k_proj": {
+                        "quant_algo": "FP8"
+                    },
+                    "model.language_model.layers.0.self_attn.v_proj": {
+                        "quant_algo": "FP8"
+                    },
+                    "model.language_model.layers.0.self_attn.gate_proj": {
+                        "quant_algo": "FP8"
+                    },
+                    "lm_head": {"quant_algo": "W4A16_NVFP4", "group_size": 16},
+                    "model.vision_tower.layers.0.attn.q_proj": {"quant_algo": "FP8"},
+                },
+                "packed_modules_mapping": (
+                    MuseGlimmerForConditionalGeneration.packed_modules_mapping
+                ),
+            }
+        )
+        quant_config.apply_weight_name_mapper(
+            MuseGlimmerForConditionalGeneration.hf_to_sglang_mapper
+        )
+
+        self.assertEqual(
+            quant_config._resolve_quant_algo("model.layers.0.mlp.gate_up_proj"),
+            "W4A16_NVFP4",
+        )
+        # Attention stays unfused whenever a quant_config is present, so q/k/v
+        # resolve per shard; only the MLP goes through packed_modules_mapping.
+        self.assertEqual(
+            quant_config._resolve_quant_algo("model.layers.0.self_attn.q_proj"),
+            "FP8",
+        )
+        self.assertEqual(
+            quant_config._resolve_quant_algo(
+                "model.layers.0.self_attn.output_gate_proj"
+            ),
+            "FP8",
+        )
+        self.assertEqual(quant_config._resolve_quant_algo("lm_head"), "W4A16_NVFP4")
+        # The vision tower hangs off the entry class, not off ``model``.
+        self.assertEqual(
+            quant_config._resolve_quant_algo("vision_tower.layers.0.attn.q_proj"),
+            "FP8",
+        )
+
     def test_nemotron_mixed_precision_with_nvfp4_layers_uses_modelopt_mixed(self):
         model_config = ModelConfig.__new__(ModelConfig)
         model_config.hf_config = MagicMock()
@@ -923,6 +917,50 @@ class TestModelOptMixedPrecisionConfig(CustomTestCase):
         )
 
         self.assertEqual(result["quant_method"], "modelopt_mixed")
+
+    def test_flat_hf_quant_config_without_quantization_key(self):
+        """Diffusion/unified ModelOpt exports use a flat hf_quant_config.json.
+
+        Regression for Cosmos3-style checkpoints that put quant_algo at the top
+        level (no nested ``quantization`` key).
+        """
+        model_config = ModelConfig.__new__(ModelConfig)
+
+        result = model_config._parse_modelopt_quant_config(
+            {
+                "quant_method": "modelopt",
+                "quant_algo": "FP8",
+                "quant_type": "FP8_FP8",
+                "ignore": ["lm_head", "visual*"],
+            }
+        )
+
+        self.assertEqual(result["quant_method"], "modelopt_fp8")
+        self.assertEqual(result["quant_algo"], "FP8")
+
+    def test_hf_quant_config_missing_quant_algo_returns_none(self):
+        model_config = ModelConfig.__new__(ModelConfig)
+        self.assertIsNone(
+            model_config._parse_modelopt_quant_config(
+                {"quant_method": "modelopt", "producer": {"name": "modelopt"}}
+            )
+        )
+
+    def test_modelopt_quant_section_supports_nested_and_flat(self):
+        nested = {"quantization": {"quant_algo": "FP8", "exclude_modules": ["lm_head"]}}
+        self.assertEqual(
+            _modelopt_quant_section(nested)["quant_algo"],
+            "FP8",
+        )
+
+        flat = {
+            "quant_method": "modelopt",
+            "quant_algo": "FP8",
+            "ignore": ["lm_head"],
+            "producer": {"name": "modelopt"},
+        }
+        self.assertIs(_modelopt_quant_section(flat), flat)
+        self.assertEqual(_modelopt_quant_section(flat)["quant_algo"], "FP8")
 
     def test_mixed_precision_override_does_not_hijack_w4afp8(self):
         self.assertIsNone(
@@ -1035,6 +1073,56 @@ class TestModelOptMixedPrecisionConfig(CustomTestCase):
         self.assertEqual(
             quant_config._resolve_quant_algo("model.layers.2.mixer.qkv_proj"),
             "FP8",
+        )
+
+    def test_mixed_precision_resolves_vl_language_model_keys(self):
+        # nvidia/Qwen3.8-Flash-Next-NVFP4 keys the text stack as
+        # `model.language_model.*` while Qwen4-Exp modules are `model.*`.
+        quant_config = ModelOptMixedPrecisionConfig.from_config(
+            {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "model.language_model.layers.3.mlp.experts": {
+                        "quant_algo": "NVFP4",
+                        "group_size": 16,
+                    },
+                    "model.language_model.layers.1.ple.ple_embedding.ngram_embedding": {
+                        "quant_algo": "FP8"
+                    },
+                    "mtp.layers.0.mlp.experts": {
+                        "quant_algo": "FP8_BLOCK_SCALES",
+                        "group_size": 128,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(quant_config.exclude_modules, [])
+        moe = FusedMoE.__new__(FusedMoE)
+        self.assertIsInstance(
+            quant_config.get_quant_method(moe, "mtp.layers.0.mlp.experts"),
+            Fp8MoEMethod,
+        )
+        self.assertEqual(
+            quant_config.get_quant_method(
+                moe, "mtp.layers.0.mlp.experts"
+            ).quant_config.weight_block_size,
+            [128, 128],
+        )
+        self.assertEqual(
+            quant_config.resolve_quant_algo("model.layers.3.mlp.experts"), "NVFP4"
+        )
+        self.assertEqual(
+            quant_config.resolve_quant_algo(
+                "model.layers.1.ple.ple_embedding.ngram_embedding"
+            ),
+            "FP8",
+        )
+        self.assertIsNone(
+            quant_config.resolve_quant_algo("model.layers.1.ple.key_proj")
+        )
+        self.assertIsNone(
+            quant_config.resolve_quant_algo("model.layers.3.mlp.shared_expert")
         )
 
 

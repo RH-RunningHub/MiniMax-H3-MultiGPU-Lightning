@@ -47,7 +47,7 @@ These measurements describe specific test configurations. Public LoRAs, prompts 
 | Faster execution | SageAttention2, Cache-DiT, torch.compile | Optimize attention, reuse parts of the computation, and compile execution graphs |
 | Multi-GPU execution | TP2+Ulysses4 | Combine tensor and sequence parallelism on PCIe systems without NVLink |
 
-RunningHub's work covers component integration, parameter selection, parallelism configuration and workload validation. The runtime is **SGLang `multimodal_gen`**. Its source is bundled at `f8cbf000f4a5bfd86d3fb7c1e2d6c8fb12339d0e`; see the [pin record](./sglang/RH-PIN.md).
+RunningHub's work covers component integration, parameter selection, parallelism configuration and workload validation. The runtime is **SGLang `multimodal_gen`**. Its source is bundled at `1f6ce4b0686232fce5feb0d0d841df7d9bcabc02`; see the [pin record](./sglang/RH-PIN.md).
 
 The backbone uses **BF16 weights**, without INT8/NVFP4 weight quantization; components such as the VAEs retain their upstream precision settings. SageAttention uses quantized attention internally, while distillation and Cache-DiT also change the computation. BF16 weights therefore do not imply identical arithmetic or lossless output. Evaluate subject consistency, detail, motion continuity, prompt adherence and audio/video synchronization.
 
@@ -83,7 +83,7 @@ The following are measured records from the validation environment (Ubuntu 22.04
 
 | Component | Version |
 |---|---|
-| SGLang | bundled snapshot `f8cbf000f4a5` (see [pin notes](./sglang/RH-PIN.md)) |
+| SGLang | bundled snapshot `1f6ce4b0` (see [pin notes](./sglang/RH-PIN.md)) |
 | PyTorch | 2.13.0+cu130 |
 | Diffusers | 0.37.0 |
 | Cache-DiT | 1.3.0 |

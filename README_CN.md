@@ -47,7 +47,7 @@ H3 Lightning 是 RunningHub 面向 MiniMax H3 的推理加速方案。在 **8× 
 | 提高执行效率 | SageAttention2、Cache-DiT、torch.compile | 优化注意力计算，复用部分计算结果，编译执行图 |
 | 优化多卡协作 | TP2+Ulysses4 | 在 PCIe、无 NVLink 环境下组合张量并行与序列并行 |
 
-RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任务验证；运行时基于 **SGLang `multimodal_gen`**。完整 SGLang 源码已内嵌于本仓库，版本为 `f8cbf000f4a5bfd86d3fb7c1e2d6c8fb12339d0e`，见 [版本记录](./sglang/RH-PIN.md)。
+RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任务验证；运行时基于 **SGLang `multimodal_gen`**。完整 SGLang 源码已内嵌于本仓库，版本为 `1f6ce4b0686232fce5feb0d0d841df7d9bcabc02`，见 [版本记录](./sglang/RH-PIN.md)。
 
 本方案的主干网络使用 **BF16 权重**，没有使用 INT8/NVFP4 权重量化；VAE 等组件沿用上游的精度配置。SageAttention 内部采用量化注意力计算，蒸馏与 Cache-DiT 也会改变计算路径，因此 BF16 权重本身不代表逐算子等价或画质无损。实际验收应覆盖主体一致性、细节、运动连贯性、提示词遵循及音画同步。
 
@@ -83,7 +83,7 @@ RunningHub 的工作覆盖加速组件集成、参数选择、多卡配置和任
 
 | 组件 | 版本 |
 |---|---|
-| SGLang | 内嵌快照 `f8cbf000f4a5`（见 [版本记录](./sglang/RH-PIN.md)） |
+| SGLang | 内嵌快照 `1f6ce4b0`（见 [版本记录](./sglang/RH-PIN.md)） |
 | PyTorch | 2.13.0+cu130 |
 | Diffusers | 0.37.0 |
 | Cache-DiT | 1.3.0 |

@@ -166,13 +166,13 @@ cython_debug/
 *.swp
 
 # SGL
-benchmark/mmlu/data
-benchmark/mmlu/data.tar
 benchmark/llava_bench/images
 benchmark/llava_bench/mme_pack
 *.jsonl
+!tools/sglang-simulator/examples/replay/trace.jsonl
 tmp*.txt
 /tmp/
+.tmp/
 
 # Torch Compile logs
 tl_out/
@@ -232,6 +232,7 @@ work_dirs/
 Cargo.lock
 !rust/Cargo.lock
 !rust/sglang-radix-tree/Cargo.lock
+!experimental/sgl-router/Cargo.lock
 
 # Generated vision test fixtures (regenerate with: python scripts/generate_vision_golden.py)
 sgl-model-gateway/tests/fixtures/golden/
@@ -282,10 +283,9 @@ artifacts/
 
 # Internal, non-published docs
 internal-docs/
-
 # --- RH embed note -----------------------------------------------------------
 # This tree ships as a verbatim source snapshot inside
-# RH-RunningHub/MiniMax-H3-MultiGPU-Acceleration. The upstream patterns above
+# RH-RunningHub/MiniMax-H3-MultiGPU-Lightning. The upstream patterns above
 # would hide files that ARE part of the snapshot (docs/cards/*.png, assets,
 # go.mod, benchmark questions.jsonl), so re-include them here.
 !*.png
